@@ -1,0 +1,344 @@
+/*
+ * FLUX CLI Application
+ *
+ * Command-line interface for FLUX.2 klein 4B image generation.
+ *
+ * Usage:
+ *   flux -m model.bin -p "prompt" -o output.png [options]
+ *
+ * Options:
+ *   -m, --model PATH      Path to model file (.bin)
+ *   -d, --dir PATH        Path to model directory (safetensors)
+ *   -p, --prompt TEXT     Text prompt for generation
+ *   -o, --output PATH     Output image path
+ *   -W, --width N         Output width (default: 1024)
+ *   -H, --height N        Output height (default: 1024)
+ *   -s, --steps N         Number of sampling steps (default: 4)
+ *   -g, --guidance N      Guidance scale (default: 1.0)
+ *   -S, --seed N          Random seed (-1 for random)
+ *   -i, --input PATH      Input image for img2img
+ *   -t, --strength N      Img2img strength (0.0-1.0)
+ *   -v, --verbose         Enable verbose output
+ *   -h, --help            Show help
+ */
+
+#include "flux.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <getopt.h>
+#include <time.h>
+
+/* Default values */
+#define DEFAULT_WIDTH 1024
+#define DEFAULT_HEIGHT 1024
+#define DEFAULT_STEPS 4
+#define DEFAULT_GUIDANCE 1.0f
+#define DEFAULT_STRENGTH 0.75f
+
+static void print_usage(const char *prog) {
+    fprintf(stderr, "FLUX.2 klein 4B - Pure C Image Generation\n\n");
+    fprintf(stderr, "Usage: %s [options]\n\n", prog);
+    fprintf(stderr, "Required (one of -m or -d):\n");
+    fprintf(stderr, "  -m, --model PATH      Path to model file (.bin)\n");
+    fprintf(stderr, "  -d, --dir PATH        Path to model directory (safetensors)\n");
+    fprintf(stderr, "  -p, --prompt TEXT     Text prompt for generation\n");
+    fprintf(stderr, "  -o, --output PATH     Output image path (.png, .ppm)\n\n");
+    fprintf(stderr, "Generation options:\n");
+    fprintf(stderr, "  -W, --width N         Output width (default: %d)\n", DEFAULT_WIDTH);
+    fprintf(stderr, "  -H, --height N        Output height (default: %d)\n", DEFAULT_HEIGHT);
+    fprintf(stderr, "  -s, --steps N         Sampling steps (default: %d)\n", DEFAULT_STEPS);
+    fprintf(stderr, "  -g, --guidance N      Guidance scale (default: %.1f)\n", DEFAULT_GUIDANCE);
+    fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n\n");
+    fprintf(stderr, "Image-to-image options:\n");
+    fprintf(stderr, "  -i, --input PATH      Input image for img2img\n");
+    fprintf(stderr, "  -t, --strength N      Strength 0.0-1.0 (default: %.2f)\n\n", DEFAULT_STRENGTH);
+    fprintf(stderr, "Other options:\n");
+    fprintf(stderr, "  -v, --verbose         Enable verbose output\n");
+    fprintf(stderr, "  -h, --help            Show this help\n\n");
+    fprintf(stderr, "Examples:\n");
+    fprintf(stderr, "  %s -m flux.bin -p \"a cat on a rainbow\" -o cat.png\n", prog);
+    fprintf(stderr, "  %s -m flux.bin -p \"oil painting style\" -i photo.png -o art.png -t 0.7\n", prog);
+}
+
+static void print_version(void) {
+    fprintf(stderr, "FLUX.2 klein 4B Inference Engine\n");
+    fprintf(stderr, "Version: 1.0.0\n");
+    fprintf(stderr, "Pure C implementation, no external dependencies\n");
+}
+
+/* Progress callback for verbose mode */
+static void progress_callback(int step, int total) {
+    int bar_width = 30;
+    float progress = (float)step / total;
+    int filled = (int)(progress * bar_width);
+
+    fprintf(stderr, "\r[");
+    for (int i = 0; i < bar_width; i++) {
+        if (i < filled) fprintf(stderr, "=");
+        else if (i == filled) fprintf(stderr, ">");
+        else fprintf(stderr, " ");
+    }
+    fprintf(stderr, "] %3d%% (%d/%d)", (int)(progress * 100), step, total);
+
+    if (step == total) {
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+}
+
+int main(int argc, char *argv[]) {
+    /* Command line options */
+    static struct option long_options[] = {
+        {"model",    required_argument, 0, 'm'},
+        {"dir",      required_argument, 0, 'd'},
+        {"prompt",   required_argument, 0, 'p'},
+        {"output",   required_argument, 0, 'o'},
+        {"width",    required_argument, 0, 'W'},
+        {"height",   required_argument, 0, 'H'},
+        {"steps",    required_argument, 0, 's'},
+        {"guidance", required_argument, 0, 'g'},
+        {"seed",     required_argument, 0, 'S'},
+        {"input",    required_argument, 0, 'i'},
+        {"strength", required_argument, 0, 't'},
+        {"verbose",  no_argument,       0, 'v'},
+        {"help",     no_argument,       0, 'h'},
+        {"version",  no_argument,       0, 'V'},
+        {0, 0, 0, 0}
+    };
+
+    /* Parse arguments */
+    char *model_path = NULL;
+    char *model_dir = NULL;
+    char *prompt = NULL;
+    char *output_path = NULL;
+    char *input_path = NULL;
+
+    flux_params params = {
+        .width = DEFAULT_WIDTH,
+        .height = DEFAULT_HEIGHT,
+        .num_steps = DEFAULT_STEPS,
+        .guidance_scale = DEFAULT_GUIDANCE,
+        .seed = -1,
+        .strength = DEFAULT_STRENGTH
+    };
+
+    int verbose = 0;
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "m:d:p:o:W:H:s:g:S:i:t:vhV",
+                              long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'm':
+                model_path = optarg;
+                break;
+            case 'd':
+                model_dir = optarg;
+                break;
+            case 'p':
+                prompt = optarg;
+                break;
+            case 'o':
+                output_path = optarg;
+                break;
+            case 'W':
+                params.width = atoi(optarg);
+                break;
+            case 'H':
+                params.height = atoi(optarg);
+                break;
+            case 's':
+                params.num_steps = atoi(optarg);
+                break;
+            case 'g':
+                params.guidance_scale = atof(optarg);
+                break;
+            case 'S':
+                params.seed = atoll(optarg);
+                break;
+            case 'i':
+                input_path = optarg;
+                break;
+            case 't':
+                params.strength = atof(optarg);
+                break;
+            case 'v':
+                verbose = 1;
+                break;
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
+            case 'V':
+                print_version();
+                return 0;
+            default:
+                print_usage(argv[0]);
+                return 1;
+        }
+    }
+
+    /* Validate required arguments */
+    if (!model_path && !model_dir) {
+        fprintf(stderr, "Error: Model path (-m) or directory (-d) is required\n\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (model_path && model_dir) {
+        fprintf(stderr, "Error: Specify either -m or -d, not both\n\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (!prompt) {
+        fprintf(stderr, "Error: Prompt is required (-p)\n\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (!output_path) {
+        fprintf(stderr, "Error: Output path is required (-o)\n\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    /* Validate parameters */
+    if (params.width < 64 || params.width > 4096) {
+        fprintf(stderr, "Error: Width must be between 64 and 4096\n");
+        return 1;
+    }
+    if (params.height < 64 || params.height > 4096) {
+        fprintf(stderr, "Error: Height must be between 64 and 4096\n");
+        return 1;
+    }
+    if (params.num_steps < 1 || params.num_steps > 100) {
+        fprintf(stderr, "Error: Steps must be between 1 and 100\n");
+        return 1;
+    }
+    if (params.strength < 0.0f || params.strength > 1.0f) {
+        fprintf(stderr, "Error: Strength must be between 0.0 and 1.0\n");
+        return 1;
+    }
+
+    if (verbose) {
+        fprintf(stderr, "FLUX.2 klein 4B Image Generator\n");
+        fprintf(stderr, "================================\n");
+        fprintf(stderr, "Model: %s\n", model_path ? model_path : model_dir);
+        fprintf(stderr, "Prompt: %s\n", prompt);
+        fprintf(stderr, "Output: %s\n", output_path);
+        fprintf(stderr, "Size: %dx%d\n", params.width, params.height);
+        fprintf(stderr, "Steps: %d\n", params.num_steps);
+        fprintf(stderr, "Guidance: %.2f\n", params.guidance_scale);
+        if (params.seed >= 0) {
+            fprintf(stderr, "Seed: %lld\n", (long long)params.seed);
+        } else {
+            fprintf(stderr, "Seed: random\n");
+        }
+        if (input_path) {
+            fprintf(stderr, "Input: %s\n", input_path);
+            fprintf(stderr, "Strength: %.2f\n", params.strength);
+        }
+        fprintf(stderr, "\n");
+    }
+
+    /* Load model */
+    if (verbose) {
+        fprintf(stderr, "Loading model...\n");
+    }
+
+    clock_t start = clock();
+
+    flux_ctx *ctx = NULL;
+    if (model_path) {
+        ctx = flux_load(model_path);
+    } else {
+        ctx = flux_load_dir(model_dir);
+    }
+    if (!ctx) {
+        fprintf(stderr, "Error: Failed to load model: %s\n", flux_get_error());
+        return 1;
+    }
+
+    if (verbose) {
+        double load_time = (double)(clock() - start) / CLOCKS_PER_SEC;
+        fprintf(stderr, "Model loaded in %.2f seconds\n", load_time);
+        fprintf(stderr, "Model info: %s\n\n", flux_model_info(ctx));
+    }
+
+    /* Set seed */
+    if (params.seed >= 0) {
+        flux_set_seed(params.seed);
+    } else {
+        flux_set_seed(time(NULL));
+    }
+
+    /* Generate image */
+    flux_image *output = NULL;
+
+    start = clock();
+
+    if (input_path) {
+        /* Image-to-image mode */
+        if (verbose) {
+            fprintf(stderr, "Loading input image...\n");
+        }
+
+        flux_image *input = flux_image_load(input_path);
+        if (!input) {
+            fprintf(stderr, "Error: Failed to load input image: %s\n", input_path);
+            flux_free(ctx);
+            return 1;
+        }
+
+        if (verbose) {
+            fprintf(stderr, "Input: %dx%d, %d channels\n",
+                    input->width, input->height, input->channels);
+            fprintf(stderr, "Generating...\n");
+        }
+
+        output = flux_img2img(ctx, prompt, input, &params);
+        flux_image_free(input);
+    } else {
+        /* Text-to-image mode */
+        if (verbose) {
+            fprintf(stderr, "Generating...\n");
+        }
+
+        output = flux_generate(ctx, prompt, &params);
+    }
+
+    if (!output) {
+        fprintf(stderr, "Error: Generation failed: %s\n", flux_get_error());
+        flux_free(ctx);
+        return 1;
+    }
+
+    double gen_time = (double)(clock() - start) / CLOCKS_PER_SEC;
+
+    if (verbose) {
+        fprintf(stderr, "Generated in %.2f seconds\n", gen_time);
+        fprintf(stderr, "Output: %dx%d, %d channels\n",
+                output->width, output->height, output->channels);
+    }
+
+    /* Save output */
+    if (verbose) {
+        fprintf(stderr, "Saving to %s...\n", output_path);
+    }
+
+    if (flux_image_save(output, output_path) != 0) {
+        fprintf(stderr, "Error: Failed to save image: %s\n", output_path);
+        flux_image_free(output);
+        flux_free(ctx);
+        return 1;
+    }
+
+    if (verbose) {
+        fprintf(stderr, "Done!\n");
+    } else {
+        printf("%s\n", output_path);
+    }
+
+    /* Cleanup */
+    flux_image_free(output);
+    flux_free(ctx);
+
+    return 0;
+}

@@ -1,0 +1,387 @@
+/*
+ * FLUX Sampling Implementation
+ *
+ * Rectified Flow sampling for image generation.
+ * Uses Euler method for ODE integration.
+ */
+
+#include "flux.h"
+#include "flux_kernels.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ========================================================================
+ * Timestep Schedules
+ * ======================================================================== */
+
+/*
+ * Linear timestep schedule from 1.0 to 0.0
+ * Returns array of num_steps+1 values: [1.0, ..., 0.0]
+ */
+float *flux_linear_schedule(int num_steps) {
+    float *schedule = (float *)malloc((num_steps + 1) * sizeof(float));
+    for (int i = 0; i <= num_steps; i++) {
+        schedule[i] = 1.0f - (float)i / (float)num_steps;
+    }
+    return schedule;
+}
+
+/*
+ * Shifted sigmoid schedule (better for flow matching)
+ * shift controls where the inflection point is
+ */
+float *flux_sigmoid_schedule(int num_steps, float shift) {
+    float *schedule = (float *)malloc((num_steps + 1) * sizeof(float));
+
+    for (int i = 0; i <= num_steps; i++) {
+        float t = (float)i / (float)num_steps;
+        /* Shifted sigmoid: more steps at the end */
+        float x = (t - 0.5f) * 10.0f + shift;
+        schedule[i] = 1.0f - 1.0f / (1.0f + expf(-x));
+    }
+
+    /* Ensure endpoints */
+    schedule[0] = 1.0f;
+    schedule[num_steps] = 0.0f;
+
+    return schedule;
+}
+
+/*
+ * Resolution-dependent schedule (as used in FLUX.2)
+ * Higher resolutions use more steps at the start
+ */
+float *flux_resolution_schedule(int num_steps, int height, int width) {
+    float *schedule = (float *)malloc((num_steps + 1) * sizeof(float));
+
+    /* Compute shift based on resolution */
+    int pixels = height * width;
+    float shift = 0.0f;
+    if (pixels >= 1024 * 1024) {
+        shift = 1.0f;  /* High res: more early steps */
+    } else if (pixels >= 512 * 512) {
+        shift = 0.5f;
+    }
+
+    for (int i = 0; i <= num_steps; i++) {
+        float t = (float)i / (float)num_steps;
+        /* Apply shift */
+        t = powf(t, 1.0f + shift * 0.5f);
+        schedule[i] = 1.0f - t;
+    }
+
+    return schedule;
+}
+
+/* ========================================================================
+ * Euler Sampler for Rectified Flow
+ * ======================================================================== */
+
+/*
+ * Single Euler step:
+ * z_next = z_t + (t_next - t_curr) * v(z_t, t_curr)
+ *
+ * Where v is the velocity predicted by the model.
+ * In rectified flow: v = (z_data - z_noise) at timestep t
+ */
+
+typedef struct flux_transformer flux_transformer_t;
+typedef struct flux_vae flux_vae_t;
+
+/* Forward declarations */
+extern float *flux_transformer_forward(flux_transformer_t *tf,
+                                       const float *img_latent, int img_h, int img_w,
+                                       const float *txt_emb, int txt_seq,
+                                       float timestep);
+
+/*
+ * Sample using Euler method.
+ *
+ * z: initial noise [batch, channels, h, w]
+ * text_emb: text embeddings [seq_len, hidden]
+ * schedule: timestep schedule [num_steps + 1]
+ * num_steps: number of denoising steps
+ * guidance_scale: classifier-free guidance scale (1.0 = no guidance)
+ */
+float *flux_sample_euler(void *transformer, void *text_encoder,
+                         float *z, int batch, int channels, int h, int w,
+                         const float *text_emb, int text_seq,
+                         const float *null_emb,  /* For CFG */
+                         const float *schedule, int num_steps,
+                         float guidance_scale,
+                         void (*progress_callback)(int step, int total)) {
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    /* Working buffers */
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    float *v_cond = NULL;
+    float *v_uncond = NULL;
+
+    flux_copy(z_curr, z, latent_size);
+
+    int use_cfg = (guidance_scale > 1.0f && null_emb != NULL);
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;  /* Negative for denoising */
+
+        /* Predict velocity with conditioning */
+        v_cond = flux_transformer_forward(tf, z_curr, h, w,
+                                          text_emb, text_seq, t_curr);
+
+        if (use_cfg) {
+            /* Predict unconditional velocity */
+            v_uncond = flux_transformer_forward(tf, z_curr, h, w,
+                                                null_emb, text_seq, t_curr);
+
+            /* CFG: v = v_uncond + scale * (v_cond - v_uncond) */
+            for (int i = 0; i < latent_size; i++) {
+                v_cond[i] = v_uncond[i] + guidance_scale * (v_cond[i] - v_uncond[i]);
+            }
+
+            free(v_uncond);
+        }
+
+        /* Euler step: z_next = z_curr + dt * v */
+        flux_axpy(z_curr, dt, v_cond, latent_size);
+
+        free(v_cond);
+
+        if (progress_callback) {
+            progress_callback(step + 1, num_steps);
+        }
+    }
+
+    return z_curr;
+}
+
+/*
+ * Sample using Euler method with stochastic noise injection.
+ * This can help with diversity and quality.
+ */
+float *flux_sample_euler_ancestral(void *transformer,
+                                   float *z, int batch, int channels, int h, int w,
+                                   const float *text_emb, int text_seq,
+                                   const float *schedule, int num_steps,
+                                   float guidance_scale, float eta,
+                                   void (*progress_callback)(int step, int total)) {
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    float *noise = (float *)malloc(latent_size * sizeof(float));
+
+    flux_copy(z_curr, z, latent_size);
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;
+
+        /* Predict velocity */
+        float *v = flux_transformer_forward(tf, z_curr, h, w,
+                                            text_emb, text_seq, t_curr);
+
+        /* Euler step */
+        flux_axpy(z_curr, dt, v, latent_size);
+
+        /* Add noise (ancestral sampling) */
+        if (eta > 0 && step < num_steps - 1) {
+            float sigma = eta * sqrtf(fabsf(dt));
+            flux_randn(noise, latent_size);
+            flux_axpy(z_curr, sigma, noise, latent_size);
+        }
+
+        free(v);
+
+        if (progress_callback) {
+            progress_callback(step + 1, num_steps);
+        }
+    }
+
+    free(noise);
+    return z_curr;
+}
+
+/* ========================================================================
+ * Heun Sampler (2nd order)
+ * ======================================================================== */
+
+/*
+ * Heun's method (improved Euler):
+ * 1. Predict: z_pred = z_t + dt * v(z_t, t)
+ * 2. Correct: z_next = z_t + dt/2 * (v(z_t, t) + v(z_pred, t+dt))
+ */
+float *flux_sample_heun(void *transformer,
+                        float *z, int batch, int channels, int h, int w,
+                        const float *text_emb, int text_seq,
+                        const float *schedule, int num_steps,
+                        float guidance_scale,
+                        void (*progress_callback)(int step, int total)) {
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    float *z_pred = (float *)malloc(latent_size * sizeof(float));
+
+    flux_copy(z_curr, z, latent_size);
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;
+
+        /* First velocity estimate */
+        float *v1 = flux_transformer_forward(tf, z_curr, h, w,
+                                             text_emb, text_seq, t_curr);
+
+        /* Predict next state */
+        flux_copy(z_pred, z_curr, latent_size);
+        flux_axpy(z_pred, dt, v1, latent_size);
+
+        /* Second velocity estimate (only if not last step) */
+        if (step < num_steps - 1) {
+            float *v2 = flux_transformer_forward(tf, z_pred, h, w,
+                                                 text_emb, text_seq, t_next);
+
+            /* Heun correction: z_next = z_curr + dt/2 * (v1 + v2) */
+            for (int i = 0; i < latent_size; i++) {
+                z_curr[i] += 0.5f * dt * (v1[i] + v2[i]);
+            }
+
+            free(v2);
+        } else {
+            /* Last step: just use Euler */
+            flux_axpy(z_curr, dt, v1, latent_size);
+        }
+
+        free(v1);
+
+        if (progress_callback) {
+            progress_callback(step + 1, num_steps);
+        }
+    }
+
+    free(z_pred);
+    return z_curr;
+}
+
+/* ========================================================================
+ * Latent Noise Initialization
+ * ======================================================================== */
+
+/*
+ * Initialize latent noise for generation.
+ * For rectified flow, we start from pure noise (t=1).
+ */
+float *flux_init_noise(int batch, int channels, int h, int w, int64_t seed) {
+    int size = batch * channels * h * w;
+    float *noise = (float *)malloc(size * sizeof(float));
+
+    if (seed >= 0) {
+        flux_rng_seed((uint64_t)seed);
+    }
+
+    flux_randn(noise, size);
+    return noise;
+}
+
+/*
+ * Initialize latent for img2img.
+ * Blend between encoded image and noise based on strength.
+ */
+float *flux_init_img2img(const float *img_latent, float strength,
+                         int batch, int channels, int h, int w, int64_t seed) {
+    int size = batch * channels * h * w;
+    float *latent = (float *)malloc(size * sizeof(float));
+
+    if (seed >= 0) {
+        flux_rng_seed((uint64_t)seed);
+    }
+
+    /* z = (1 - strength) * img_latent + strength * noise */
+    float noise_scale = strength;
+    float img_scale = 1.0f - strength;
+
+    for (int i = 0; i < size; i++) {
+        float noise = flux_random_normal();
+        latent[i] = img_scale * img_latent[i] + noise_scale * noise;
+    }
+
+    return latent;
+}
+
+/* ========================================================================
+ * Full Generation Pipeline
+ * ======================================================================== */
+
+/*
+ * Complete text-to-image generation pipeline.
+ */
+typedef struct flux_ctx flux_ctx;
+
+/* Forward declaration */
+extern flux_ctx *flux_get_ctx(void);
+
+float *flux_generate_latent(void *ctx_ptr,
+                            const float *text_emb, int text_seq,
+                            int height, int width,
+                            int num_steps, float guidance_scale,
+                            int64_t seed,
+                            void (*progress_callback)(int step, int total)) {
+    /* Compute latent dimensions */
+    int latent_h = height / 16;
+    int latent_w = width / 16;
+    int channels = FLUX_LATENT_CHANNELS;
+
+    /* Initialize noise */
+    float *z = flux_init_noise(1, channels, latent_h, latent_w, seed);
+
+    /* Get schedule (4 steps for klein distilled) */
+    float *schedule = flux_linear_schedule(num_steps);
+
+    /* Sample */
+    /* Note: For klein, guidance_scale should be 1.0 (guidance-distilled) */
+    float *latent = flux_sample_euler(ctx_ptr, NULL,
+                                      z, 1, channels, latent_h, latent_w,
+                                      text_emb, text_seq,
+                                      NULL,  /* No null embedding for klein */
+                                      schedule, num_steps,
+                                      guidance_scale,
+                                      progress_callback);
+
+    free(z);
+    free(schedule);
+
+    return latent;
+}
+
+/* ========================================================================
+ * Progress and Logging
+ * ======================================================================== */
+
+static int g_verbose = 0;
+
+void flux_set_verbose(int verbose) {
+    g_verbose = verbose;
+}
+
+static void default_progress(int step, int total) {
+    if (g_verbose) {
+        fprintf(stderr, "\rStep %d/%d", step, total);
+        if (step == total) {
+            fprintf(stderr, "\n");
+        }
+        fflush(stderr);
+    }
+}
+
+void (*flux_progress_callback)(int, int) = default_progress;
+
+void flux_set_progress_callback(void (*callback)(int, int)) {
+    flux_progress_callback = callback ? callback : default_progress;
+}

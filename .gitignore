@@ -1,0 +1,23 @@
+# Object files
+*.o
+
+# Compiled binaries
+flux
+
+# Model weights (large files)
+flux-klein-model/
+
+# Misc directory (tests, images, utilities)
+misc/
+
+# IDE and editor files
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+*.a
+*.so
+*.dylib
