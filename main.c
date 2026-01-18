@@ -171,6 +171,7 @@ int main(int argc, char *argv[]) {
     };
 
     int verbose = 0;
+    int width_set = 0, height_set = 0;  /* Track if user explicitly set size */
 
     int opt;
     while ((opt = getopt_long(argc, argv, "d:p:o:W:H:s:g:S:i:t:e:n:vhV",
@@ -187,9 +188,11 @@ int main(int argc, char *argv[]) {
                 break;
             case 'W':
                 params.width = atoi(optarg);
+                width_set = 1;
                 break;
             case 'H':
                 params.height = atoi(optarg);
+                height_set = 1;
                 break;
             case 's':
                 params.num_steps = atoi(optarg);
@@ -330,9 +333,14 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
+        /* Use input image dimensions if not explicitly set */
+        if (!width_set) params.width = input->width;
+        if (!height_set) params.height = input->height;
+
         if (verbose) {
             fprintf(stderr, "Input: %dx%d, %d channels\n",
                     input->width, input->height, input->channels);
+            fprintf(stderr, "Output: %dx%d\n", params.width, params.height);
             fprintf(stderr, "Generating...\n");
         }
 
