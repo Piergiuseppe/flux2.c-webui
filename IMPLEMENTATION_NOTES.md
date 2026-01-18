@@ -717,3 +717,64 @@ Stats for real tokens only (first 21):
 - Encoding time: ~2-3 seconds on M3 Max
 - Memory: ~8 GB for FP32 weights (loaded from safetensors)
 
+---
+
+## Recent Updates (2024-01-18)
+
+### Memory Management: Automatic Encoder Release
+
+The text encoder (~8GB) is now automatically released after encoding to reduce peak memory during diffusion.
+
+**API**:
+```c
+void flux_release_text_encoder(flux_ctx *ctx);
+```
+
+**Behavior**:
+- `flux_generate()` and `flux_img2img()` auto-release the encoder after encoding
+- If a new prompt is provided, the encoder reloads automatically from `model_dir`
+- Library users can call `flux_release_text_encoder()` manually for fine control
+
+**Implementation**:
+- Added `model_dir` field to `flux_ctx` to track model path for reloading
+- Modified `flux_encode_text()` to reload encoder if NULL
+- Peak memory reduced from ~16GB to ~8GB during diffusion
+
+### img2img Fix: Use Full Denoising Steps
+
+**Bug**: img2img was reducing steps based on strength (e.g., strength=0.8 → 3 steps instead of 4).
+
+**Root cause**: FLUX klein is a 4-step distilled model that must always use exactly 4 denoising steps. The strength parameter should only control the noise level added to the input image, not skip steps.
+
+**Fix** (flux.c):
+```c
+/* For distilled models like FLUX klein (4-step), we should always use
+ * the full number of steps. The strength controls how much noise is added
+ * to the image, not how many steps are skipped. */
+int num_steps = p.num_steps;  // Always use full steps
+float t_start = strength;     // Strength controls initial noise level
+```
+
+### Default Size Change
+
+- Default output size changed from 1024x1024 to 256x256
+- Faster iteration for testing and development
+- Users can still specify `-W` and `-H` for larger images
+
+### img2img Output Size
+
+When using `-i` for img2img, if `-W` and `-H` are not specified:
+- Output dimensions default to input image dimensions
+- Before: always defaulted to 1024x1024 regardless of input
+
+### Seed Reproducibility
+
+The actual seed used is now always printed to stderr:
+```
+$ ./flux -d model -p "test" -o out.png
+Seed: 1705612345
+out.png
+```
+
+This allows reproducing any run by using `-S <seed>` with the printed value.
+

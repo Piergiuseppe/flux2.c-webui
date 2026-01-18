@@ -22,7 +22,7 @@ That's it. No Python runtime, no PyTorch, no CUDA toolkit required at inference 
 
 ![Woman with sunglasses](images/woman_with_sunglasses.png)
 
-*Generated with: `./flux -d flux-klein-model -p "A woman wearing sunglasses" -W 512 -H 512 -S 42`*
+*Generated with: `./flux -d flux-klein-model -p "A picture of a woman in 1960 America. Sunglasses. ASA 400 film. Black and White." -W 250 -H 250 -o /tmp/woman.png`, and later processed with image to image generation via `./flux -d flux-klein-model -i /tmp/woman.png -o /tmp/woman2.png -p "oil painting of woman with sunglasses" -v -H 256 -W 256`*
 
 ## Features
 
