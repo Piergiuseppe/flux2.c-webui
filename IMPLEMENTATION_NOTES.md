@@ -961,3 +961,25 @@ Each operation's output is used as input to the next operation. Batching only he
 - Consider moving attention computation to GPU (batched matmul for all heads)
 - Or focus on bf16 inference which is simpler and still provides speedup
 
+### 2024-01-19: GPU-Accelerated Attention
+
+**Added:**
+- `flux_metal_attention()` in `flux_metal.m` - batched attention for all heads
+- Modified `mha_forward()` to use GPU attention when Metal is available
+- Modified `joint_attention()` to use GPU attention for both image and text streams
+- Increased `attn_scores` buffer to accommodate all heads simultaneously
+
+**Implementation:**
+The GPU attention function batches all 24 heads into two GPU submissions per attention call:
+1. Phase 1: Q @ K^T for all heads (24 matmuls encoded in single command buffer)
+2. Phase 2: Softmax on CPU (still faster than copying to GPU for small seq)
+3. Phase 3: scores @ V for all heads (24 matmuls encoded in single command buffer)
+
+This reduces sync overhead from 48+ CPU BLAS calls to just 2 GPU syncs per attention.
+
+**Tests:** MPS and BLAS both pass reference comparison (max diff: 1.0, mean: 0.0001)
+
+**Next steps:**
+- Implement persistent GPU activations to keep tensors on GPU between operations
+- This is the key to achieving real speedup (avoid CPU-GPU copies for every operation)
+

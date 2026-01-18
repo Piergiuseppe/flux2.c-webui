@@ -103,6 +103,101 @@ static void clear_weight_cache(void) {
     pthread_mutex_unlock(&g_cache_mutex);
 }
 
+/* ========================================================================
+ * Activation Buffer Pool
+ * Reusable GPU buffers for activation tensors to avoid per-operation allocation.
+ * Buffers use shared memory mode for zero-copy CPU access on Apple Silicon.
+ * ======================================================================== */
+
+#define ACTIVATION_POOL_SIZE 64
+
+typedef struct {
+    id<MTLBuffer> buffer;
+    size_t size;
+    int in_use;
+} pool_buffer_t;
+
+static pool_buffer_t g_activation_pool[ACTIVATION_POOL_SIZE];
+static int g_pool_count = 0;
+static pthread_mutex_t g_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Get a buffer from pool, or create new one if needed */
+static id<MTLBuffer> pool_get_buffer(size_t size) {
+    pthread_mutex_lock(&g_pool_mutex);
+
+    /* Look for existing buffer of sufficient size */
+    for (int i = 0; i < g_pool_count; i++) {
+        if (!g_activation_pool[i].in_use && g_activation_pool[i].size >= size) {
+            g_activation_pool[i].in_use = 1;
+            id<MTLBuffer> buf = g_activation_pool[i].buffer;
+            pthread_mutex_unlock(&g_pool_mutex);
+            return buf;
+        }
+    }
+
+    /* No suitable buffer found - create new one */
+    if (g_pool_count < ACTIVATION_POOL_SIZE) {
+        /* Round up size to reduce fragmentation */
+        size_t alloc_size = size;
+        if (alloc_size < 1024 * 1024) {
+            alloc_size = ((alloc_size + 65535) / 65536) * 65536;  /* 64KB alignment */
+        } else {
+            alloc_size = ((alloc_size + 1048575) / 1048576) * 1048576;  /* 1MB alignment */
+        }
+
+        id<MTLBuffer> buf = [g_device newBufferWithLength:alloc_size
+                                                  options:MTLResourceStorageModeShared];
+        if (buf) {
+            g_activation_pool[g_pool_count].buffer = buf;
+            g_activation_pool[g_pool_count].size = alloc_size;
+            g_activation_pool[g_pool_count].in_use = 1;
+            g_pool_count++;
+            pthread_mutex_unlock(&g_pool_mutex);
+            return buf;
+        }
+    }
+
+    pthread_mutex_unlock(&g_pool_mutex);
+
+    /* Pool full or allocation failed - create temporary buffer */
+    return [g_device newBufferWithLength:size options:MTLResourceStorageModeShared];
+}
+
+/* Return buffer to pool (mark as available) */
+static void pool_release_buffer(id<MTLBuffer> buffer) {
+    if (!buffer) return;
+
+    pthread_mutex_lock(&g_pool_mutex);
+    for (int i = 0; i < g_pool_count; i++) {
+        if (g_activation_pool[i].buffer == buffer) {
+            g_activation_pool[i].in_use = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pool_mutex);
+}
+
+/* Release all buffers back to pool (call at end of batch) */
+static void pool_release_all(void) {
+    pthread_mutex_lock(&g_pool_mutex);
+    for (int i = 0; i < g_pool_count; i++) {
+        g_activation_pool[i].in_use = 0;
+    }
+    pthread_mutex_unlock(&g_pool_mutex);
+}
+
+/* Clear the entire pool */
+static void clear_activation_pool(void) {
+    pthread_mutex_lock(&g_pool_mutex);
+    for (int i = 0; i < g_pool_count; i++) {
+        g_activation_pool[i].buffer = nil;
+        g_activation_pool[i].in_use = 0;
+        g_activation_pool[i].size = 0;
+    }
+    g_pool_count = 0;
+    pthread_mutex_unlock(&g_pool_mutex);
+}
+
 
 /* ========================================================================
  * Metal Initialization
@@ -157,6 +252,7 @@ void flux_metal_cleanup(void) {
             flux_metal_end_batch();
         }
         clear_weight_cache();
+        clear_activation_pool();
         g_queue = nil;
         g_device = nil;
         g_initialized = 0;
@@ -190,13 +286,16 @@ void flux_metal_end_batch(void) {
                 memcpy(g_pending_outputs[i].cpu_ptr,
                        [g_pending_outputs[i].buffer contents],
                        g_pending_outputs[i].size);
-                g_pending_outputs[i].buffer = nil;
+                /* Don't nil the buffer - it's from the pool */
             }
 
             g_batch_cmd = nil;
         }
         g_in_batch = 0;
         g_pending_count = 0;
+
+        /* Release all pooled buffers back to pool */
+        pool_release_all();
     }
 }
 
@@ -230,21 +329,23 @@ void flux_metal_sgemm(int transpose_a, int transpose_b,
 
         /* Get or create buffers
          * - B (weights) uses cache (likely reused across calls)
-         * - A (input) and C (output) created fresh each time
+         * - A (input) and C (output) use pooled buffers to avoid allocation overhead
          */
         id<MTLBuffer> bufferB = get_cached_weight_buffer(B, sizeB);
 
-        /* Create buffers with copy - safer than NoCopy which has alignment requirements */
-        id<MTLBuffer> bufferA = [g_device newBufferWithBytes:A
-                                                     length:sizeA
-                                                    options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufferC = [g_device newBufferWithLength:sizeC
-                                                     options:MTLResourceStorageModeShared];
+        /* Use pooled buffers for activations */
+        id<MTLBuffer> bufferA = pool_get_buffer(sizeA);
+        id<MTLBuffer> bufferC = pool_get_buffer(sizeC);
 
         if (!bufferA || !bufferB || !bufferC) {
             /* Fallback if buffer creation fails */
+            if (bufferA) pool_release_buffer(bufferA);
+            if (bufferC) pool_release_buffer(bufferC);
             return;
         }
+
+        /* Copy input A to GPU buffer */
+        memcpy([bufferA contents], A, sizeA);
 
         /* Initialize C if beta != 0 */
         if (beta != 0.0f) {
@@ -301,17 +402,25 @@ void flux_metal_sgemm(int transpose_a, int transpose_b,
                 g_pending_outputs[g_pending_count].cpu_ptr = C;
                 g_pending_outputs[g_pending_count].size = sizeC;
                 g_pending_count++;
+                /* bufferA can be released immediately after encoding */
+                pool_release_buffer(bufferA);
             } else {
                 /* Too many pending outputs - fall back to immediate sync */
                 [cmdBuffer commit];
                 [cmdBuffer waitUntilCompleted];
                 memcpy(C, [bufferC contents], sizeC);
+                pool_release_buffer(bufferA);
+                pool_release_buffer(bufferC);
             }
         } else {
             /* Not in batch mode: execute immediately */
             [cmdBuffer commit];
             [cmdBuffer waitUntilCompleted];
             memcpy(C, [bufferC contents], sizeC);
+
+            /* Release pooled buffers */
+            pool_release_buffer(bufferA);
+            pool_release_buffer(bufferC);
         }
     }
 }
@@ -412,4 +521,172 @@ void flux_metal_sync(void) {
 size_t flux_metal_memory_used(void) {
     if (!g_initialized || !g_device) return 0;
     return [g_device currentAllocatedSize];
+}
+
+/* External softmax function from flux_kernels.c */
+extern void flux_softmax(float *x, int rows, int cols);
+
+/*
+ * GPU-accelerated attention with batched heads.
+ * Does: out = softmax(Q @ K^T * scale) @ V for all heads in parallel.
+ *
+ * Q: [heads, seq_q, head_dim]
+ * K: [heads, seq_k, head_dim]
+ * V: [heads, seq_k, head_dim]
+ * scores_scratch: [heads * seq_q * seq_k]
+ * out: [heads, seq_q, head_dim]
+ */
+void flux_metal_attention(float *out,
+                          const float *Q, const float *K, const float *V,
+                          float *scores_scratch,
+                          int heads, int seq_q, int seq_k, int head_dim,
+                          float scale) {
+    if (!g_initialized || heads <= 0) return;
+
+    @autoreleasepool {
+        size_t q_stride = (size_t)seq_q * head_dim;
+        size_t k_stride = (size_t)seq_k * head_dim;
+        size_t v_stride = (size_t)seq_k * head_dim;
+        size_t scores_stride = (size_t)seq_q * seq_k;
+        size_t out_stride = (size_t)seq_q * head_dim;
+
+        size_t sizeQ = heads * q_stride * sizeof(float);
+        size_t sizeK = heads * k_stride * sizeof(float);
+        size_t sizeV = heads * v_stride * sizeof(float);
+        size_t sizeScores = heads * scores_stride * sizeof(float);
+        size_t sizeOut = heads * out_stride * sizeof(float);
+
+        /* Create GPU buffers using shared memory (zero-copy on Apple Silicon) */
+        id<MTLBuffer> bufQ = [g_device newBufferWithBytes:Q length:sizeQ
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufK = [g_device newBufferWithBytes:K length:sizeK
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufV = [g_device newBufferWithBytes:V length:sizeV
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufScores = [g_device newBufferWithLength:sizeScores
+                                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut = [g_device newBufferWithLength:sizeOut
+                                                     options:MTLResourceStorageModeShared];
+
+        if (!bufQ || !bufK || !bufV || !bufScores || !bufOut) {
+            return;
+        }
+
+        /* === Phase 1: Batched Q @ K^T === */
+        {
+            id<MTLCommandBuffer> cmdBuffer = [g_queue commandBuffer];
+
+            /* Descriptors for single head matrices */
+            MPSMatrixDescriptor *descQ = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:seq_q columns:head_dim
+                                rowBytes:head_dim * sizeof(float)
+                                dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor *descK = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:seq_k columns:head_dim
+                                rowBytes:head_dim * sizeof(float)
+                                dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor *descScores = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:seq_q columns:seq_k
+                                rowBytes:seq_k * sizeof(float)
+                                dataType:MPSDataTypeFloat32];
+
+            /* Create matmul kernel: scores = scale * Q @ K^T */
+            MPSMatrixMultiplication *matmul_qk = [[MPSMatrixMultiplication alloc]
+                initWithDevice:g_device
+                   transposeLeft:NO
+                  transposeRight:YES
+                      resultRows:seq_q
+                   resultColumns:seq_k
+                 interiorColumns:head_dim
+                           alpha:scale
+                            beta:0.0f];
+
+            /* Encode all heads */
+            for (int h = 0; h < heads; h++) {
+                size_t offsetQ = h * q_stride * sizeof(float);
+                size_t offsetK = h * k_stride * sizeof(float);
+                size_t offsetS = h * scores_stride * sizeof(float);
+
+                MPSMatrix *matQ = [[MPSMatrix alloc]
+                    initWithBuffer:bufQ offset:offsetQ descriptor:descQ];
+                MPSMatrix *matK = [[MPSMatrix alloc]
+                    initWithBuffer:bufK offset:offsetK descriptor:descK];
+                MPSMatrix *matScores = [[MPSMatrix alloc]
+                    initWithBuffer:bufScores offset:offsetS descriptor:descScores];
+
+                [matmul_qk encodeToCommandBuffer:cmdBuffer
+                                      leftMatrix:matQ
+                                     rightMatrix:matK
+                                    resultMatrix:matScores];
+            }
+
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+        }
+
+        /* Copy scores to CPU scratch buffer */
+        memcpy(scores_scratch, [bufScores contents], sizeScores);
+
+        /* === Phase 2: Softmax on CPU (per head, per row) === */
+        for (int h = 0; h < heads; h++) {
+            flux_softmax(scores_scratch + h * scores_stride, seq_q, seq_k);
+        }
+
+        /* Copy softmax results back to GPU */
+        memcpy([bufScores contents], scores_scratch, sizeScores);
+
+        /* === Phase 3: Batched scores @ V === */
+        {
+            id<MTLCommandBuffer> cmdBuffer = [g_queue commandBuffer];
+
+            MPSMatrixDescriptor *descScores = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:seq_q columns:seq_k
+                                rowBytes:seq_k * sizeof(float)
+                                dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor *descV = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:seq_k columns:head_dim
+                                rowBytes:head_dim * sizeof(float)
+                                dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor *descOut = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:seq_q columns:head_dim
+                                rowBytes:head_dim * sizeof(float)
+                                dataType:MPSDataTypeFloat32];
+
+            /* Create matmul kernel: out = scores @ V */
+            MPSMatrixMultiplication *matmul_sv = [[MPSMatrixMultiplication alloc]
+                initWithDevice:g_device
+                   transposeLeft:NO
+                  transposeRight:NO
+                      resultRows:seq_q
+                   resultColumns:head_dim
+                 interiorColumns:seq_k
+                           alpha:1.0f
+                            beta:0.0f];
+
+            /* Encode all heads */
+            for (int h = 0; h < heads; h++) {
+                size_t offsetS = h * scores_stride * sizeof(float);
+                size_t offsetV = h * v_stride * sizeof(float);
+                size_t offsetO = h * out_stride * sizeof(float);
+
+                MPSMatrix *matScores = [[MPSMatrix alloc]
+                    initWithBuffer:bufScores offset:offsetS descriptor:descScores];
+                MPSMatrix *matV = [[MPSMatrix alloc]
+                    initWithBuffer:bufV offset:offsetV descriptor:descV];
+                MPSMatrix *matOut = [[MPSMatrix alloc]
+                    initWithBuffer:bufOut offset:offsetO descriptor:descOut];
+
+                [matmul_sv encodeToCommandBuffer:cmdBuffer
+                                      leftMatrix:matScores
+                                     rightMatrix:matV
+                                    resultMatrix:matOut];
+            }
+
+            [cmdBuffer commit];
+            [cmdBuffer waitUntilCompleted];
+        }
+
+        /* Copy output back to CPU */
+        memcpy(out, [bufOut contents], sizeOut);
+    }
 }

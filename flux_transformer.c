@@ -30,6 +30,11 @@
 #endif
 #endif
 
+/* Use Metal for GPU acceleration when available */
+#ifdef USE_METAL
+#include "flux_metal.h"
+#endif
+
 /* ========================================================================
  * Transformer Data Structures
  * ======================================================================== */
@@ -470,60 +475,69 @@ static void mha_forward(float *out, const float *q, const float *k, const float 
     transpose_shd_to_hsd(k_t, k, seq, tf->num_heads, head_dim);
     transpose_shd_to_hsd(v_t, v, seq, tf->num_heads, head_dim);
 
-    /* Process each head with BLAS */
-    for (int h = 0; h < tf->num_heads; h++) {
-        float *qh = q_t + h * seq * head_dim;
-        float *kh = k_t + h * seq * head_dim;
-        float *vh = v_t + h * seq * head_dim;
-        float *oh = out_t + h * seq * head_dim;
-
-        /* scores = Q @ K^T using BLAS */
-        /* Q[seq, head_dim] @ K[seq, head_dim]^T = scores[seq, seq] */
-#ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    seq, seq, head_dim,
-                    scale, qh, head_dim, kh, head_dim,
-                    0.0f, scores, seq);
-#else
-        for (int i = 0; i < seq; i++) {
-            for (int j = 0; j < seq; j++) {
-                float dot = 0.0f;
-                const float *qh_row = qh + i * head_dim;
-                const float *kh_row = kh + j * head_dim;
-                for (int d = 0; d < head_dim; d++) {
-                    dot += qh_row[d] * kh_row[d];
-                }
-                scores[i * seq + j] = dot * scale;
-            }
-        }
+#ifdef USE_METAL
+    /* Use GPU-accelerated batched attention when Metal is available */
+    if (flux_metal_available()) {
+        flux_metal_attention(out_t, q_t, k_t, v_t, scores,
+                             tf->num_heads, seq, seq, head_dim, scale);
+    } else
 #endif
+    {
+        /* Process each head with BLAS */
+        for (int h = 0; h < tf->num_heads; h++) {
+            float *qh = q_t + h * seq * head_dim;
+            float *kh = k_t + h * seq * head_dim;
+            float *vh = v_t + h * seq * head_dim;
+            float *oh = out_t + h * seq * head_dim;
 
-        /* Softmax */
-        flux_softmax(scores, seq, seq);
-
-        /* out = scores @ V using BLAS */
-        /* scores[seq, seq] @ V[seq, head_dim] = out[seq, head_dim] */
+            /* scores = Q @ K^T using BLAS */
+            /* Q[seq, head_dim] @ K[seq, head_dim]^T = scores[seq, seq] */
 #ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    seq, head_dim, seq,
-                    1.0f, scores, seq, vh, head_dim,
-                    0.0f, oh, head_dim);
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        seq, seq, head_dim,
+                        scale, qh, head_dim, kh, head_dim,
+                        0.0f, scores, seq);
 #else
-        for (int i = 0; i < seq; i++) {
-            float *oh_row = oh + i * head_dim;
-            const float *score_row = scores + i * seq;
-            for (int d = 0; d < head_dim; d++) {
-                oh_row[d] = 0.0f;
-            }
-            for (int j = 0; j < seq; j++) {
-                float s_val = score_row[j];
-                const float *v_row = vh + j * head_dim;
-                for (int d = 0; d < head_dim; d++) {
-                    oh_row[d] += s_val * v_row[d];
+            for (int i = 0; i < seq; i++) {
+                for (int j = 0; j < seq; j++) {
+                    float dot = 0.0f;
+                    const float *qh_row = qh + i * head_dim;
+                    const float *kh_row = kh + j * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        dot += qh_row[d] * kh_row[d];
+                    }
+                    scores[i * seq + j] = dot * scale;
                 }
             }
-        }
 #endif
+
+            /* Softmax */
+            flux_softmax(scores, seq, seq);
+
+            /* out = scores @ V using BLAS */
+            /* scores[seq, seq] @ V[seq, head_dim] = out[seq, head_dim] */
+#ifdef USE_BLAS
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        seq, head_dim, seq,
+                        1.0f, scores, seq, vh, head_dim,
+                        0.0f, oh, head_dim);
+#else
+            for (int i = 0; i < seq; i++) {
+                float *oh_row = oh + i * head_dim;
+                const float *score_row = scores + i * seq;
+                for (int d = 0; d < head_dim; d++) {
+                    oh_row[d] = 0.0f;
+                }
+                for (int j = 0; j < seq; j++) {
+                    float s_val = score_row[j];
+                    const float *v_row = vh + j * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        oh_row[d] += s_val * v_row[d];
+                    }
+                }
+            }
+#endif
+        }
     }
 
     /* Transpose output back to [seq, heads, head_dim] */
@@ -572,118 +586,134 @@ static void joint_attention(float *img_out, float *txt_out,
     transpose_shd_to_hsd(cat_k_t, cat_k, total_seq, heads, head_dim);
     transpose_shd_to_hsd(cat_v_t, cat_v, total_seq, heads, head_dim);
 
-    /* Use attn_scores buffer, split for img and txt */
-    float *img_scores = tf->attn_scores;
-    float *txt_scores = tf->attn_scores + img_seq * total_seq;
+    /* Use attn_scores buffer for scores scratch space */
+    float *scores = tf->attn_scores;
 
-    for (int h = 0; h < heads; h++) {
-        float *qh_img = img_q_t + h * img_seq * head_dim;
-        float *qh_txt = txt_q_t + h * txt_seq * head_dim;
-        float *kh = cat_k_t + h * total_seq * head_dim;
-        float *vh = cat_v_t + h * total_seq * head_dim;
-        float *oh_img = img_out_t + h * img_seq * head_dim;
-        float *oh_txt = txt_out_t + h * txt_seq * head_dim;
+#ifdef USE_METAL
+    /* Use GPU-accelerated batched attention when Metal is available */
+    if (flux_metal_available()) {
+        /* Image attention: img_Q @ cat_K^T, softmax, @ cat_V */
+        flux_metal_attention(img_out_t, img_q_t, cat_k_t, cat_v_t, scores,
+                             heads, img_seq, total_seq, head_dim, scale);
+        /* Text attention: txt_Q @ cat_K^T, softmax, @ cat_V */
+        flux_metal_attention(txt_out_t, txt_q_t, cat_k_t, cat_v_t, scores,
+                             heads, txt_seq, total_seq, head_dim, scale);
+    } else
+#endif
+    {
+        /* Use attn_scores buffer, split for img and txt */
+        float *img_scores = scores;
+        float *txt_scores = scores + img_seq * total_seq;
 
-        /* Image Q @ K^T */
+        for (int h = 0; h < heads; h++) {
+            float *qh_img = img_q_t + h * img_seq * head_dim;
+            float *qh_txt = txt_q_t + h * txt_seq * head_dim;
+            float *kh = cat_k_t + h * total_seq * head_dim;
+            float *vh = cat_v_t + h * total_seq * head_dim;
+            float *oh_img = img_out_t + h * img_seq * head_dim;
+            float *oh_txt = txt_out_t + h * txt_seq * head_dim;
+
+            /* Image Q @ K^T */
 #ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    img_seq, total_seq, head_dim,
-                    scale, qh_img, head_dim, kh, head_dim,
-                    0.0f, img_scores, total_seq);
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        img_seq, total_seq, head_dim,
+                        scale, qh_img, head_dim, kh, head_dim,
+                        0.0f, img_scores, total_seq);
 #else
-        for (int i = 0; i < img_seq; i++) {
-            for (int j = 0; j < total_seq; j++) {
-                float dot = 0.0f;
-                const float *qh_row = qh_img + i * head_dim;
-                const float *kh_row = kh + j * head_dim;
-                for (int d = 0; d < head_dim; d++) {
-                    dot += qh_row[d] * kh_row[d];
+            for (int i = 0; i < img_seq; i++) {
+                for (int j = 0; j < total_seq; j++) {
+                    float dot = 0.0f;
+                    const float *qh_row = qh_img + i * head_dim;
+                    const float *kh_row = kh + j * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        dot += qh_row[d] * kh_row[d];
+                    }
+                    img_scores[i * total_seq + j] = dot * scale;
                 }
-                img_scores[i * total_seq + j] = dot * scale;
             }
-        }
 #endif
 
 #ifdef DEBUG_ATTENTION
-        if (h == 0) {
-            fprintf(stderr, "[ATTN] Image query 0, head 0 scores:\n");
-            fprintf(stderr, "  first 5 txt keys: ");
-            for (int j = 0; j < 5; j++) fprintf(stderr, "%.6f ", img_scores[j]);
-            fprintf(stderr, "\n  first 5 img keys (pos %d): ", txt_seq);
-            for (int j = txt_seq; j < txt_seq + 5; j++) fprintf(stderr, "%.6f ", img_scores[j]);
-            fprintf(stderr, "\n");
-        }
+            if (h == 0) {
+                fprintf(stderr, "[ATTN] Image query 0, head 0 scores:\n");
+                fprintf(stderr, "  first 5 txt keys: ");
+                for (int j = 0; j < 5; j++) fprintf(stderr, "%.6f ", img_scores[j]);
+                fprintf(stderr, "\n  first 5 img keys (pos %d): ", txt_seq);
+                for (int j = txt_seq; j < txt_seq + 5; j++) fprintf(stderr, "%.6f ", img_scores[j]);
+                fprintf(stderr, "\n");
+            }
 #endif
 
-        flux_softmax(img_scores, img_seq, total_seq);
+            flux_softmax(img_scores, img_seq, total_seq);
 
-        /* Image scores @ V */
+            /* Image scores @ V */
 #ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    img_seq, head_dim, total_seq,
-                    1.0f, img_scores, total_seq, vh, head_dim,
-                    0.0f, oh_img, head_dim);
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        img_seq, head_dim, total_seq,
+                        1.0f, img_scores, total_seq, vh, head_dim,
+                        0.0f, oh_img, head_dim);
 #else
-        for (int i = 0; i < img_seq; i++) {
-            float *oh_row = oh_img + i * head_dim;
-            const float *score_row = img_scores + i * total_seq;
-            for (int d = 0; d < head_dim; d++) {
-                oh_row[d] = 0.0f;
-            }
-            for (int j = 0; j < total_seq; j++) {
-                float s_val = score_row[j];
-                const float *v_row = vh + j * head_dim;
+            for (int i = 0; i < img_seq; i++) {
+                float *oh_row = oh_img + i * head_dim;
+                const float *score_row = img_scores + i * total_seq;
                 for (int d = 0; d < head_dim; d++) {
-                    oh_row[d] += s_val * v_row[d];
+                    oh_row[d] = 0.0f;
+                }
+                for (int j = 0; j < total_seq; j++) {
+                    float s_val = score_row[j];
+                    const float *v_row = vh + j * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        oh_row[d] += s_val * v_row[d];
+                    }
                 }
             }
-        }
 #endif
 
-        /* Text Q @ K^T */
+            /* Text Q @ K^T */
 #ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    txt_seq, total_seq, head_dim,
-                    scale, qh_txt, head_dim, kh, head_dim,
-                    0.0f, txt_scores, total_seq);
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        txt_seq, total_seq, head_dim,
+                        scale, qh_txt, head_dim, kh, head_dim,
+                        0.0f, txt_scores, total_seq);
 #else
-        for (int i = 0; i < txt_seq; i++) {
-            for (int j = 0; j < total_seq; j++) {
-                float dot = 0.0f;
-                const float *qh_row = qh_txt + i * head_dim;
-                const float *kh_row = kh + j * head_dim;
-                for (int d = 0; d < head_dim; d++) {
-                    dot += qh_row[d] * kh_row[d];
-                }
-                txt_scores[i * total_seq + j] = dot * scale;
-            }
-        }
-#endif
-
-        flux_softmax(txt_scores, txt_seq, total_seq);
-
-        /* Text scores @ V */
-#ifdef USE_BLAS
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    txt_seq, head_dim, total_seq,
-                    1.0f, txt_scores, total_seq, vh, head_dim,
-                    0.0f, oh_txt, head_dim);
-#else
-        for (int i = 0; i < txt_seq; i++) {
-            float *oh_row = oh_txt + i * head_dim;
-            const float *score_row = txt_scores + i * total_seq;
-            for (int d = 0; d < head_dim; d++) {
-                oh_row[d] = 0.0f;
-            }
-            for (int j = 0; j < total_seq; j++) {
-                float s_val = score_row[j];
-                const float *v_row = vh + j * head_dim;
-                for (int d = 0; d < head_dim; d++) {
-                    oh_row[d] += s_val * v_row[d];
+            for (int i = 0; i < txt_seq; i++) {
+                for (int j = 0; j < total_seq; j++) {
+                    float dot = 0.0f;
+                    const float *qh_row = qh_txt + i * head_dim;
+                    const float *kh_row = kh + j * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        dot += qh_row[d] * kh_row[d];
+                    }
+                    txt_scores[i * total_seq + j] = dot * scale;
                 }
             }
-        }
 #endif
+
+            flux_softmax(txt_scores, txt_seq, total_seq);
+
+            /* Text scores @ V */
+#ifdef USE_BLAS
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        txt_seq, head_dim, total_seq,
+                        1.0f, txt_scores, total_seq, vh, head_dim,
+                        0.0f, oh_txt, head_dim);
+#else
+            for (int i = 0; i < txt_seq; i++) {
+                float *oh_row = oh_txt + i * head_dim;
+                const float *score_row = txt_scores + i * total_seq;
+                for (int d = 0; d < head_dim; d++) {
+                    oh_row[d] = 0.0f;
+                }
+                for (int j = 0; j < total_seq; j++) {
+                    float s_val = score_row[j];
+                    const float *v_row = vh + j * head_dim;
+                    for (int d = 0; d < head_dim; d++) {
+                        oh_row[d] += s_val * v_row[d];
+                    }
+                }
+            }
+#endif
+        }
     }
 
     /* Transpose outputs back */
@@ -1401,7 +1431,8 @@ flux_transformer_t *flux_transformer_load(FILE *f) {
     tf->attn_k_t = (float *)malloc(max_seq * hidden * sizeof(float));
     tf->attn_v_t = (float *)malloc(max_seq * hidden * sizeof(float));
     tf->attn_out_t = (float *)malloc(max_seq * hidden * sizeof(float));
-    tf->attn_scores = (float *)malloc(max_seq * max_seq * sizeof(float));
+    /* For GPU batched attention, need space for all heads' scores simultaneously */
+    tf->attn_scores = (float *)malloc((size_t)tf->num_heads * max_seq * max_seq * sizeof(float));
     tf->attn_cat_k = (float *)malloc(max_seq * hidden * sizeof(float));
     tf->attn_cat_v = (float *)malloc(max_seq * hidden * sizeof(float));
 
@@ -1651,7 +1682,8 @@ flux_transformer_t *flux_transformer_load_safetensors(safetensors_file_t *sf) {
     tf->attn_k_t = malloc(max_seq * hidden * sizeof(float));
     tf->attn_v_t = malloc(max_seq * hidden * sizeof(float));
     tf->attn_out_t = malloc(max_seq * hidden * sizeof(float));
-    tf->attn_scores = malloc(max_seq * max_seq * sizeof(float));
+    /* For GPU batched attention, need space for all heads' scores simultaneously */
+    tf->attn_scores = malloc((size_t)tf->num_heads * max_seq * max_seq * sizeof(float));
     tf->attn_cat_k = malloc(max_seq * hidden * sizeof(float));
     tf->attn_cat_v = malloc(max_seq * hidden * sizeof(float));
 

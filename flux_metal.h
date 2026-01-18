@@ -87,6 +87,23 @@ int flux_metal_in_batch(void);
  */
 size_t flux_metal_memory_used(void);
 
+/*
+ * GPU-accelerated scaled dot-product attention.
+ * Computes attention for all heads in a single GPU batch.
+ *
+ * Q, K, V are in [heads, seq_q/seq_k, head_dim] layout (already transposed)
+ * scores_scratch must be pre-allocated: [heads * seq_q * seq_k] floats
+ * out will be [heads, seq_q, head_dim]
+ *
+ * This does: out = softmax(Q @ K^T * scale) @ V
+ * Softmax is done on CPU (between two GPU batches).
+ */
+void flux_metal_attention(float *out,
+                          const float *Q, const float *K, const float *V,
+                          float *scores_scratch,
+                          int heads, int seq_q, int seq_k, int head_dim,
+                          float scale);
+
 #ifdef __cplusplus
 }
 #endif
