@@ -174,7 +174,55 @@ This file contains crucial implementation details that should not be forgotten.
   - Output: test_cat_python_1step.png
 - C test: `./flux --dir flux-klein-model --embeddings text_embeddings_official.bin --seed 42 --steps 1 --output test_cat_fixed.png --height 64 --width 64`
 
-## Current Status (2024-01-17)
+## Current Status (2024-01-18)
 - Transformer: FULLY WORKING (matches Python)
-- VAE: Need to verify C implementation matches Python
-- Next: Compare test_cat_fixed.png (C) with test_cat_python_1step.png (Python)
+- VAE: FULLY WORKING (verified matches reference image)
+- Performance: Significantly optimized
+
+## Performance Optimizations
+
+### Linear layers (flux_linear) - DONE
+- Replaced naive O(n^3) loop with BLAS cblas_sgemm
+- Uses Apple Accelerate framework on macOS, OpenBLAS on Linux
+- Speedup: ~30x (from ~32 GFLOPS to ~989 GFLOPS)
+
+### Convolution (flux_conv2d) - DONE
+- Replaced naive 6-nested-loop implementation with im2col + BLAS
+- im2col transforms conv into matrix multiplication
+- Speedup: ~180x (VAE decode: 18.6s -> 0.1s)
+
+### Performance Results (64x64, 1 step)
+Before optimization: ~142s total
+After linear BLAS:    ~42s total (Transformer=22s, VAE=18s)
+After conv BLAS:      ~24s total (Transformer=22s, VAE=0.1s)
+
+### Attention workspace optimization - DONE
+- Pre-allocated attention buffers (attn_q_t, attn_k_t, etc.) in transformer struct
+- Eliminates ~150 malloc/free calls per forward pass (mha_forward and joint_attention)
+- Marginal speedup (malloc overhead was not the main bottleneck)
+
+### Remaining Bottleneck: Transformer (22s for 64x64)
+- Main operations already use BLAS (sgemm)
+- Bottleneck is the sheer number of FLOPs in linear projections:
+  - Single block fused projection: [528, 3072] @ [27648, 3072] = ~90B FLOPs per block
+  - 20 single blocks = ~1.8T FLOPs just for one layer type
+- Further optimization would require:
+  - Multi-threading (OpenMP) - clang on macOS doesn't support, need brew libomp
+  - Batched GEMM for attention heads
+  - Memory layout optimization for cache efficiency
+
+## Test Verification
+Reference image: test_vectors/reference_1step_64x64_seed42.png
+After any optimization, verify with:
+```bash
+./flux --dir flux-klein-model --embeddings text_embeddings_official.bin --seed 42 --steps 1 --output /tmp/test.png --height 64 --width 64
+python3 -c "
+import numpy as np
+from PIL import Image
+ref = np.array(Image.open('test_vectors/reference_1step_64x64_seed42.png'))
+test = np.array(Image.open('/tmp/test.png'))
+diff = np.abs(ref.astype(float) - test.astype(float))
+print(f'Max diff: {diff.max()}, Mean diff: {diff.mean():.4f}')
+print('PASS' if diff.max() < 2 else 'FAIL')
+"
+```

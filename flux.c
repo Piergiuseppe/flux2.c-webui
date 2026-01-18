@@ -666,6 +666,9 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
     void (*progress)(int, int) = ctx->verbose ? default_progress : NULL;
     if (progress) clock_gettime(CLOCK_MONOTONIC, &g_start_time);
 
+    struct timespec t_sample_start, t_sample_end, t_vae_start, t_vae_end;
+    clock_gettime(CLOCK_MONOTONIC, &t_sample_start);
+
     float *latent = flux_sample_euler(
         ctx->transformer, ctx->text_encoder,
         z, 1, FLUX_LATENT_CHANNELS, latent_h, latent_w,
@@ -676,6 +679,8 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
         progress
     );
 
+    clock_gettime(CLOCK_MONOTONIC, &t_sample_end);
+
     free(z);
     free(schedule);
 
@@ -685,9 +690,16 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
     }
 
     /* Decode latent to image */
+    clock_gettime(CLOCK_MONOTONIC, &t_vae_start);
     flux_image *img = NULL;
     if (ctx->vae) {
         img = flux_vae_decode(ctx->vae, latent, 1, latent_h, latent_w);
+        clock_gettime(CLOCK_MONOTONIC, &t_vae_end);
+        double sample_time = (t_sample_end.tv_sec - t_sample_start.tv_sec) +
+                             (t_sample_end.tv_nsec - t_sample_start.tv_nsec) / 1e9;
+        double vae_time = (t_vae_end.tv_sec - t_vae_start.tv_sec) +
+                          (t_vae_end.tv_nsec - t_vae_start.tv_nsec) / 1e9;
+        fprintf(stderr, "Timing: Transformer=%.2fs, VAE=%.2fs\n", sample_time, vae_time);
     } else {
         set_error("No VAE loaded");
         free(latent);

@@ -210,13 +210,17 @@ static void attnblock_forward(float *out, const float *x,
         float *scores = (float *)malloc(spatial * spatial * sizeof(float));
 
         /* Q @ K^T */
-        for (int i = 0; i < spatial; i++) {
-            for (int j = 0; j < spatial; j++) {
-                float dot = 0.0f;
-                for (int c = 0; c < ch; c++) {
-                    dot += qb[c * spatial + i] * kb[c * spatial + j];
+        memset(scores, 0, spatial * spatial * sizeof(float));
+        for (int c = 0; c < ch; c++) {
+            const float *q_c = qb + c * spatial;
+            const float *k_c = kb + c * spatial;
+            for (int i = 0; i < spatial; i++) {
+                float qv = q_c[i] * scale;
+                float *score_row = scores + i * spatial;
+                const float *k_ptr = k_c;
+                for (int j = 0; j < spatial; j++) {
+                    *score_row++ += qv * *k_ptr++;
                 }
-                scores[i * spatial + j] = dot * scale;
             }
         }
 

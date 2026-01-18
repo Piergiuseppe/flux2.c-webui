@@ -187,12 +187,15 @@ void flux_linear(float *y, const float *x, const float *W, const float *b,
                  int seq_len, int in_dim, int out_dim) {
     /* y[seq, out] = x[seq, in] @ W[out, in]^T + b[out] */
     for (int s = 0; s < seq_len; s++) {
+        const float *x_row = x + s * in_dim;
+        float *y_row = y + s * out_dim;
         for (int o = 0; o < out_dim; o++) {
+            const float *w_row = W + o * in_dim;
             float sum = (b != NULL) ? b[o] : 0.0f;
             for (int i = 0; i < in_dim; i++) {
-                sum += x[s * in_dim + i] * W[o * in_dim + i];
+                sum += x_row[i] * w_row[i];
             }
-            y[s * out_dim + o] = sum;
+            y_row[o] = sum;
         }
     }
 }
