@@ -21,6 +21,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <sys/time.h>
 
 /* External timing counters from flux_sample.c */
 extern double flux_timing_transformer_total;
@@ -28,9 +29,11 @@ extern double flux_timing_transformer_double;
 extern double flux_timing_transformer_single;
 extern double flux_timing_transformer_final;
 
-/* Helper to get current time in ms */
+/* Helper to get current time in ms (wall-clock) */
 static double tf_get_time_ms(void) {
-    return (double)clock() * 1000.0 / CLOCKS_PER_SEC;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
 /* Use BLAS for matrix operations when enabled via Makefile */

@@ -29,6 +29,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <time.h>
+#include <sys/time.h>
 
 #ifdef USE_METAL
 #include "flux_metal.h"
@@ -94,8 +95,8 @@ static void cli_substep_callback(flux_substep_type_t type, int index, int total)
     fflush(stderr);
 }
 
-/* Track phase timing */
-static clock_t cli_phase_start;
+/* Track phase timing (wall-clock) */
+static struct timeval cli_phase_start_tv;
 static const char *cli_current_phase = NULL;
 
 /* Called at phase boundaries (encoding text, decoding image, etc.) */
@@ -111,7 +112,7 @@ static void cli_phase_callback(const char *phase, int done) {
 
         /* Phase starting */
         cli_current_phase = phase;
-        cli_phase_start = clock();
+        gettimeofday(&cli_phase_start_tv, NULL);
 
         /* Capitalize first letter for display */
         char display[64];
@@ -125,7 +126,10 @@ static void cli_phase_callback(const char *phase, int done) {
         fflush(stderr);
     } else {
         /* Phase finished */
-        double elapsed = (double)(clock() - cli_phase_start) / CLOCKS_PER_SEC;
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        double elapsed = (now.tv_sec - cli_phase_start_tv.tv_sec) +
+                         (now.tv_usec - cli_phase_start_tv.tv_usec) / 1000000.0;
         fprintf(stderr, " done (%.1fs)\n", elapsed);
         cli_current_phase = NULL;
     }
@@ -153,17 +157,20 @@ static void cli_finish_progress(void) {
 }
 
 /* ========================================================================
- * Timing Helper
+ * Timing Helper (wall-clock time)
  * ======================================================================== */
 
-static clock_t timer_start;
+static struct timeval timer_start_tv;
 
 static void timer_begin(void) {
-    timer_start = clock();
+    gettimeofday(&timer_start_tv, NULL);
 }
 
 static double timer_end(void) {
-    return (double)(clock() - timer_start) / CLOCKS_PER_SEC;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    return (now.tv_sec - timer_start_tv.tv_sec) +
+           (now.tv_usec - timer_start_tv.tv_usec) / 1000000.0;
 }
 
 /* ========================================================================
@@ -372,7 +379,8 @@ int main(int argc, char *argv[]) {
 
     /* Generate image */
     flux_image *output = NULL;
-    clock_t total_start = clock();
+    struct timeval total_start_tv;
+    gettimeofday(&total_start_tv, NULL);
 
     if (input_path) {
         /* ============== Image-to-image mode ============== */
@@ -492,7 +500,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    double total_time = (double)(clock() - total_start) / CLOCKS_PER_SEC;
+    struct timeval total_end_tv;
+    gettimeofday(&total_end_tv, NULL);
+    double total_time = (total_end_tv.tv_sec - total_start_tv.tv_sec) +
+                        (total_end_tv.tv_usec - total_start_tv.tv_usec) / 1000000.0;
     LOG_VERBOSE("Generated in %.1fs total\n", total_time);
     LOG_VERBOSE("  Output: %dx%d, %d channels\n",
                 output->width, output->height, output->channels);
@@ -510,6 +521,13 @@ int main(int argc, char *argv[]) {
     }
 
     LOG_NORMAL(" %s (%.1fs)\n", output_path, timer_end());
+
+    /* Print total time (always, unless quiet) */
+    struct timeval final_tv;
+    gettimeofday(&final_tv, NULL);
+    double total_time_final = (final_tv.tv_sec - total_start_tv.tv_sec) +
+                              (final_tv.tv_usec - total_start_tv.tv_usec) / 1000000.0;
+    LOG_NORMAL("Total generation time: %.1f seconds\n", load_time + total_time_final);
 
     /* Cleanup */
     flux_image_free(output);

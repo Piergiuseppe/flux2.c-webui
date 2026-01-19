@@ -12,10 +12,13 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <sys/time.h>
 
-/* Timing utilities for performance analysis */
+/* Timing utilities for performance analysis - use wall-clock time */
 static double get_time_ms(void) {
-    return (double)clock() * 1000.0 / CLOCKS_PER_SEC;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
 /* Cumulative timing for denoising breakdown */
