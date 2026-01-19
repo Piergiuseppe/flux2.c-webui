@@ -211,15 +211,20 @@ This reduces peak memory from ~16GB to ~4-5GB, making inference possible on syst
 
 ### How Fast Is It?
 
-Benchmarks on **Apple M3 Max** (128GB RAM), generating a 4-step image:
+Benchmarks on **Apple M3 Max** (128GB RAM), generating a 4-step image.
+
+**Important:** Previous benchmarks in this README were misleading - they compared C timings (which included model loading) against PyTorch timings (which excluded loading and used warmup runs). The table below shows fair "cold start" benchmarks where all implementations include model loading time and no warmup:
 
 | Size | C (MPS) | C (BLAS) | PyTorch (MPS) |
 |------|---------|----------|---------------|
-| 256x256 | 23s | 24s | 2.9s |
+| 256x256 | 22s | 24s | 11s |
+| 512x512 | 30s | 44s | 13s |
 
 **Notes:**
-- The C implementation uses float32 throughout, while PyTorch uses bfloat16 with highly optimized MPS kernels. The next step of this project is likely to implement such an optimization, in order to reach similar speed, or at least try to approach it. Notably, we currently don't take activations on the GPU between operations: this is likely going to require some serious refactoring, and it is essential to improve speed significantly.
-- Times include text encoding, denoising (4 steps), and VAE decode (excludes model loading).
+- All times measured with `time` command (wall clock), including model loading, no warmup.
+- The C implementation uses float32 throughout, while PyTorch uses bfloat16 with highly optimized MPS kernels.
+- PyTorch benefits from keeping activations on GPU between operations; the C implementation currently transfers data between CPU and GPU for each operation.
+- The `make generic` backend (pure C, no BLAS) is approximately 30x slower than BLAS and not included in benchmarks.
 
 ### Resolution Limits
 
