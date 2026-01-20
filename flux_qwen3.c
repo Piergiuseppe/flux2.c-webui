@@ -30,9 +30,11 @@
 #include "flux_metal.h"
 #endif
 
-/* Minimum matrix size for GPU acceleration. Lower threshold to use GPU for more
- * operations (K/V projections ~262K, output/down ~655K, gate/up ~2.5M).
- * Note: Very small matrices may have GPU sync overhead > BLAS compute time. */
+/* Minimum matrix size for GPU acceleration.
+ * Using 10M threshold keeps text encoder on CPU (Accelerate BLAS), which is
+ * faster and avoids GPU memory pressure on 16GB systems. Text encoder weights
+ * are only used once per generation, so GPU caching provides no benefit.
+ * Fixes issue #9: SIGKILL on 16GB Metal systems during text encoding. */
 #define QWEN3_MIN_GPU_ELEMENTS (10 * 1024 * 1024)
 
 /* ========================================================================

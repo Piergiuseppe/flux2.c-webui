@@ -1429,7 +1429,9 @@ static int single_block_forward_gpu(float *hidden, const single_block_t *block,
         float x = t_emb[i];
         t_emb_silu[i] = x / (1.0f + expf(-x));
     }
-    float *mod_params = tf->work2 + tf->max_seq_len * h_size * 3;
+    /* mod_params goes after fused_out in work2 buffer. Must match single_block_forward. */
+    int fused_dim = h_size * 3 + mlp_hidden * 2;
+    float *mod_params = tf->work2 + seq * fused_dim;
     flux_linear_nobias(mod_params, t_emb_silu, adaln_weight, 1, h_size, mod_size);
 
     float *shift = mod_params;
@@ -1448,7 +1450,6 @@ static int single_block_forward_gpu(float *hidden, const single_block_t *block,
 
     /* Allocate output tensors */
     flux_gpu_tensor_t norm_gpu = flux_gpu_tensor_alloc(seq * h_size);
-    int fused_dim = h_size * 3 + mlp_hidden * 2;
     flux_gpu_tensor_t fused_gpu = flux_gpu_tensor_alloc(seq * fused_dim);
     flux_gpu_tensor_t q_gpu = flux_gpu_tensor_alloc(seq * h_size);
     flux_gpu_tensor_t k_gpu = flux_gpu_tensor_alloc(seq * h_size);
