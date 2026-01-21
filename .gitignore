@@ -7,8 +7,9 @@ flux
 # Model weights (large files)
 flux-klein-model/
 
-# Misc directory (tests, images, utilities)
+# Misc directories (tests, images, utilities, markdown files)
 misc/
+documents/
 
 # IDE and editor files
 .vscode/
