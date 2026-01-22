@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 # Test cases: (name, prompt, seed, steps, width, height, reference_file, max_diff)
+# Optional: "input" for img2img tests
 TESTS = [
     {
         "name": "64x64 quick test (2 steps)",
@@ -35,6 +36,17 @@ TESTS = [
         "reference": "test_vectors/reference_4step_512x512_seed123.png",
         "max_diff": 18,
     },
+    {
+        "name": "256x256 img2img test (4 steps)",
+        "prompt": "A colorful oil painting of a cat",
+        "seed": 456,
+        "steps": 4,
+        "width": 256,
+        "height": 256,
+        "input": "test_vectors/img2img_input_256x256.png",
+        "reference": "test_vectors/reference_img2img_256x256_seed456.png",
+        "max_diff": 10,
+    },
 ]
 
 
@@ -53,6 +65,10 @@ def run_test(flux_binary: str, test: dict, model_dir: str) -> tuple[bool, str]:
         "-H", str(test["height"]),
         "-o", output_path,
     ]
+
+    # Add input image for img2img tests
+    if "input" in test:
+        cmd.extend(["-i", test["input"]])
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

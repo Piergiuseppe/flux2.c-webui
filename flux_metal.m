@@ -1234,14 +1234,12 @@ int flux_metal_conv2d(float *out, const float *in,
     size_t b_bytes = (size_t)out_ch * sizeof(float);
 
     @autoreleasepool {
-        id<MTLBuffer> in_buf = [g_device newBufferWithBytesNoCopy:(void *)in
-                                                           length:in_bytes
-                                                          options:MTLResourceStorageModeShared
-                                                      deallocator:nil];
-        id<MTLBuffer> out_buf = [g_device newBufferWithBytesNoCopy:out
-                                                            length:out_bytes
-                                                           options:MTLResourceStorageModeShared
-                                                       deallocator:nil];
+        /* Use copy-based buffers for input and output to avoid alignment issues */
+        id<MTLBuffer> in_buf = [g_device newBufferWithBytes:in
+                                                     length:in_bytes
+                                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> out_buf = [g_device newBufferWithLength:out_bytes
+                                                      options:MTLResourceStorageModeShared];
         id<MTLBuffer> w_buf = get_cached_weight_buffer(weight, w_bytes);
         id<MTLBuffer> b_buf = get_cached_weight_buffer(bias, b_bytes);
         if (!in_buf || !out_buf || !w_buf || !b_buf) return 0;
@@ -1286,6 +1284,9 @@ int flux_metal_conv2d(float *out, const float *in,
 
         [mps_cmd commit];
         [mps_cmd waitUntilCompleted];
+
+        /* Copy result back to output */
+        memcpy(out, [out_buf contents], out_bytes);
         return 1;
     }
 }
