@@ -215,7 +215,8 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -v, --verbose         Detailed output\n\n");
     fprintf(stderr, "Other options:\n");
     fprintf(stderr, "  -e, --embeddings PATH Load pre-computed text embeddings\n");
-    fprintf(stderr, "  -m, --mmap            Use mmap for text encoder (saves ~8GB RAM, slower)\n");
+    fprintf(stderr, "  -m, --mmap            Use memory-mapped weights (default, fastest on MPS)\n");
+    fprintf(stderr, "      --no-mmap         Disable mmap, load all weights upfront\n");
     fprintf(stderr, "  -h, --help            Show this help\n\n");
     fprintf(stderr, "Examples:\n");
     fprintf(stderr, "  %s -d model/ -p \"a cat on a rainbow\" -o cat.png\n", prog);
@@ -254,6 +255,7 @@ int main(int argc, char *argv[]) {
         {"help",       no_argument,       0, 'h'},
         {"version",    no_argument,       0, 'V'},
         {"mmap",       no_argument,       0, 'm'},
+        {"no-mmap",    no_argument,       0, 'M'},
         {"debug-py",   no_argument,       0, 'D'},
         {0, 0, 0, 0}
     };
@@ -276,11 +278,11 @@ int main(int argc, char *argv[]) {
     };
 
     int width_set = 0, height_set = 0;
-    int use_mmap = 0;
+    int use_mmap = 1;  /* mmap is default (fastest on MPS) */
     int debug_py = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:p:o:W:H:s:g:S:i:t:e:n:qvhVmD",
+    while ((opt = getopt_long(argc, argv, "d:p:o:W:H:s:g:S:i:t:e:n:qvhVmMD",
                               long_options, NULL)) != -1) {
         switch (opt) {
             case 'd': model_dir = optarg; break;
@@ -302,6 +304,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "FLUX.2 klein 4B v1.0.0\n");
                 return 0;
             case 'm': use_mmap = 1; break;
+            case 'M': use_mmap = 0; break;
             case 'D': debug_py = 1; break;
             default:
                 print_usage(argv[0]);

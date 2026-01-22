@@ -36,12 +36,12 @@ That's it. No Python runtime or CUDA toolkit required at inference time.
 
 - **Zero dependencies**: Pure C implementation, works standalone. BLAS optional for ~30x speedup (Apple Accelerate on macOS, OpenBLAS on Linux)
 - **Metal GPU acceleration**: Automatic on Apple Silicon Macs. Performance matches PyTorch's optimized MPS pipeline
-- **Runs where Python can't**: The `--mmap` mode enables inference on 8GB RAM systems (likely even less, but not tested) where the Python ML stack cannot run FLUX.2 at all
+- **Runs where Python can't**: Memory-mapped weights (default) enable inference on 8GB RAM systems where the Python ML stack cannot run FLUX.2 at all
 - **Text-to-image**: Generate images from text prompts
 - **Image-to-image**: Transform existing images guided by prompts
 - **Integrated text encoder**: Qwen3-4B encoder built-in, no external embedding computation needed
 - **Memory efficient**: Automatic encoder release after encoding (~8GB freed)
-- **Low memory mode**: `--mmap` flag enables on-demand weight loading, reducing peak memory from ~16GB to ~4-5GB. On MPS, `--mmap` is also the fastest mode (see benchmarks below)
+- **Memory-mapped weights**: Enabled by default. On-demand weight loading reduces peak memory from ~16GB to ~4-5GB and is also the fastest mode on MPS (see benchmarks). Use `--no-mmap` to load all weights upfront
 
 ## Usage
 
@@ -101,7 +101,8 @@ FLUX.2 uses **in-context conditioning** for image-to-image generation. Unlike tr
 
 **Other options:**
 ```
--m, --mmap            Low memory mode (load weights on-demand, slower)
+-m, --mmap            Memory-mapped weights (default, fastest on MPS)
+    --no-mmap         Disable mmap, load all weights upfront
 -e, --embeddings PATH Load pre-computed text embeddings (advanced)
 -h, --help            Show help
 ```
@@ -236,15 +237,16 @@ This downloads approximately 16GB to `./flux-klein-model`:
 
 The text encoder is automatically released after encoding, reducing peak memory during diffusion. If you generate multiple images with different prompts, the encoder reloads automatically.
 
-### Low Memory Inference (and Fastest MPS Mode)
+### Memory-Mapped Weights (Default)
 
-The `--mmap` flag enables memory-mapped weight loading. On Apple Silicon with MPS, this is also the **fastest** mode:
+Memory-mapped weight loading is enabled by default. On Apple Silicon with MPS, this is also the **fastest** mode. Use `--no-mmap` to disable and load all weights upfront.
 
 ```bash
-./flux -d flux-klein-model -p "A cat" -o cat.png --mmap
+./flux -d flux-klein-model -p "A cat" -o cat.png           # mmap (default)
+./flux -d flux-klein-model -p "A cat" -o cat.png --no-mmap # load all upfront
 ```
 
-**How it works:** Instead of loading all model weights into RAM upfront, `--mmap` keeps the safetensors files memory-mapped and loads weights on-demand:
+**How it works:** Instead of loading all model weights into RAM upfront, mmap keeps the safetensors files memory-mapped and loads weights on-demand:
 
 - **Text encoder (Qwen3):** Each of the 36 transformer layers (~400MB each) is loaded, processed, and immediately freed. Only ~2GB stays resident instead of ~8GB.
 - **Denoising transformer:** Each of the 5 double-blocks (~300MB) and 20 single-blocks (~150MB) is loaded on-demand and freed after use. Only ~200MB of shared weights stays resident instead of ~4GB.
@@ -252,28 +254,28 @@ The `--mmap` flag enables memory-mapped weight loading. On Apple Silicon with MP
 This reduces peak memory from ~16GB to ~4-5GB, making inference possible on 16GB RAM systems where the Python ML stack cannot run FLUX.2 at all.
 
 **Backend compatibility:**
-- `make mps` - **Recommended.** Fastest mode on Apple Silicon (see benchmarks above)
+- `make mps` - **Recommended.** Fastest on Apple Silicon
 - `make blas` - Works, useful for CPU-only systems
 - `make generic` - Works, slower due to repeated I/O
 
-**Why --mmap is fastest on MPS:** The speed advantage comes from faster model loading. Instead of malloc+read+copy for all weights upfront, mmap lets the kernel handle paging efficiently. Once the file is in the kernel buffer cache, subsequent runs are fast. Inference speed itself is the same as non-mmap mode.
+**Why mmap is fast:** The speed advantage comes from faster model loading. Instead of malloc+read+copy for all weights upfront, mmap lets the kernel handle paging efficiently. Once the file is in the kernel buffer cache, subsequent runs are fast. Inference speed itself is the same as `--no-mmap` mode.
 
 ### How Fast Is It?
 
 Benchmarks on **Apple M3 Max** (128GB RAM), generating a 4-step image.
 
-The MPS implementation with `--mmap` matches the PyTorch optimized pipeline performance. This is the recommended mode for Apple Silicon.
+The MPS implementation matches the PyTorch optimized pipeline performance. The "C (MPS)" column shows default behavior (mmap enabled).
 
-| Size | C (MPS --mmap) | C (MPS) | PyTorch (MPS) |
-|------|----------------|---------|---------------|
+| Size | C (MPS) | C (--no-mmap) | PyTorch (MPS) |
+|------|---------|---------------|---------------|
 | 256x256 | 14s | 23s | 11s |
 | 512x512 | 18s | 18s | 13s |
 | 1024x1024 | 29s | 32s | 25s |
 
 **Notes:**
 - All times measured as wall clock, including model loading, no warmup. PyTorch times exclude library import overhead (~5-10s) to be fair.
-- The `--mmap` mode is faster because model loading is faster (mmap vs malloc+read+copy). Inference speed is the same.
-- The C BLAS backend (CPU) is not shown; use `--mmap` with BLAS on CPU for best results as it avoids the costly upfront loading.
+- Default mmap mode is faster because model loading is faster (mmap vs malloc+read+copy). Inference speed is the same.
+- The C BLAS backend (CPU) is not shown; mmap is also the default and fastest there.
 - The `make generic` backend (pure C, no BLAS) is approximately 30x slower than BLAS and not included in benchmarks.
 
 ### Resolution Limits
