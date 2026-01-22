@@ -40,7 +40,7 @@ That's it. No Python runtime or CUDA toolkit required at inference time.
 - **Image-to-image**: Transform existing images guided by prompts
 - **Integrated text encoder**: Qwen3-4B encoder built-in, no external embedding computation needed
 - **Memory efficient**: Automatic encoder release after encoding (~8GB freed)
-- **Low memory mode**: `--mmap` flag enables on-demand weight loading, reducing peak memory from ~16GB to ~4-5GB for 16GB RAM systems
+- **Low memory mode**: `--mmap` flag enables on-demand weight loading, reducing peak memory from ~16GB to ~4-5GB for 16GB RAM systems. On MPS, `--mmap` can also provide a speed advantage even with plenty of RAM (see below)
 
 ## Usage
 
@@ -251,11 +251,16 @@ For systems with limited RAM (16GB or less), the `--mmap` flag enables memory-ma
 This reduces peak memory from ~16GB to ~4-5GB, making inference possible on systems with only 16GB of RAM (tested on Linux).
 
 **Backend compatibility:**
-- `make generic` - Works
-- `make blas` - Works
-- `make mps` - Works, but less beneficial since MPS already uses bf16 weights on GPU (no expansion to float32), so memory pressure is lower
+- `make generic` - Works, slower due to repeated I/O
+- `make blas` - Works, slower due to repeated I/O
+- `make mps` - Works, and may actually be **faster** (see below)
 
-**Trade-off:** Inference is slower with `--mmap` due to repeated disk I/O and weight conversion. Use it only when you don't have enough RAM for normal operation.
+**MPS + mmap optimization:** On Apple Silicon with MPS, `--mmap` uses an optimized path:
+- **Zero-copy bf16 access:** Weights are read directly from memory-mapped files without malloc/copy overhead
+- **Persistent GPU cache:** The bf16→f16 conversion cache persists across denoising steps. Step 1 populates the cache, steps 2+ benefit from cache hits (~12% faster)
+- **Reduced memory traffic:** Only bf16 weights are loaded (f32 conversion skipped entirely)
+
+Because of these optimizations, `--mmap` with MPS can be competitive with or even faster than normal mode in some scenarios, while using significantly less RAM. It's worth trying even if you have plenty of memory.
 
 ### How Fast Is It?
 
