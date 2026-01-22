@@ -49,7 +49,7 @@ extern "C" {
 #define FLUX_VAE_CH_MULT_3      4
 #define FLUX_VAE_NUM_RES        2
 #define FLUX_VAE_GROUPS         32
-#define FLUX_VAE_MAX_DIM        1024  /* Max image dimension for VAE */
+#define FLUX_VAE_MAX_DIM        1792  /* Max image dimension for VAE */
 
 /* Tokenizer */
 #define FLUX_MAX_SEQ_LEN        512
@@ -91,7 +91,9 @@ typedef struct {
 } flux_params;
 
 /* Default parameters */
-#define FLUX_PARAMS_DEFAULT { 256, 256, 4, 1.0f, -1, 0.75f }
+#define FLUX_DEFAULT_WIDTH  256
+#define FLUX_DEFAULT_HEIGHT 256
+#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 4, 1.0f, -1, 0.75f }
 
 /* ========================================================================
  * Core API

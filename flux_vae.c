@@ -714,8 +714,8 @@ flux_vae_t *flux_vae_load(FILE *f) {
     vae->bn_var = read_floats(f, FLUX_LATENT_CHANNELS);
 
     /* Allocate working memory */
-    int max_spatial = vae->max_h * vae->max_w;
-    int max_channels = mid_ch;  /* 512 */
+    size_t max_spatial = (size_t)vae->max_h * vae->max_w;
+    size_t max_channels = mid_ch;  /* 512 */
     vae->work_size = 4 * max_channels * max_spatial * sizeof(float);
     vae->work1 = (float *)malloc(vae->work_size);
     vae->work2 = (float *)malloc(vae->work_size);
@@ -940,8 +940,8 @@ flux_vae_t *flux_vae_load_safetensors(safetensors_file_t *sf) {
     vae->base_channels = 128;
     vae->num_res_blocks = 2;
     vae->num_groups = 32;
-    vae->max_h = 1024;
-    vae->max_w = 1024;
+    vae->max_h = FLUX_VAE_MAX_DIM;
+    vae->max_w = FLUX_VAE_MAX_DIM;
     vae->eps = 1e-4f;  /* batch_norm_eps from config */
 
     vae->ch_mult[0] = ch_mult[0];
@@ -1067,9 +1067,10 @@ flux_vae_t *flux_vae_load_safetensors(safetensors_file_t *sf) {
      *
      * Memory per buffer = 4 * 128 * H * W = 512 * H * W floats
      * For 1024x1024: ~2GB per buffer, ~6GB total working memory
+     * For 1792x1792: ~6GB per buffer, ~18GB total working memory
      */
-    int max_spatial = vae->max_h * vae->max_w;
-    int max_channels = vae->base_channels;  /* 128 at full resolution */
+    size_t max_spatial = (size_t)vae->max_h * vae->max_w;
+    size_t max_channels = vae->base_channels;  /* 128 at full resolution */
     vae->work_size = 4 * max_channels * max_spatial * sizeof(float);
     vae->work1 = malloc(vae->work_size);
     vae->work2 = malloc(vae->work_size);

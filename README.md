@@ -258,7 +258,7 @@ The MPS implementation matches the PyTorch optimized pipeline performance.
 
 ## Resolution Limits
 
-**Maximum resolution**: 1024x1024 pixels. Higher resolutions require prohibitive memory for the attention mechanisms.
+**Maximum resolution**: 1792x1792 pixels. The model produces good results up to this size; beyond this resolution image quality degrades significantly (this is a model limitation, not an implementation issue).
 
 **Minimum resolution**: 64x64 pixels.
 

@@ -138,9 +138,9 @@ flux_ctx *flux_load_dir(const char *model_dir) {
         return NULL;
     }
 
-    /* Set defaults - max 1024x1024 due to O(seq^2) attention memory */
-    ctx->max_width = 1024;
-    ctx->max_height = 1024;
+    /* Set defaults - max 1792x1792 (requires ~18GB VAE work buffers) */
+    ctx->max_width = FLUX_VAE_MAX_DIM;
+    ctx->max_height = FLUX_VAE_MAX_DIM;
     ctx->default_steps = 4;
     ctx->default_guidance = 1.0f;
     strncpy(ctx->model_name, "FLUX.2-klein-4B", sizeof(ctx->model_name) - 1);
@@ -298,8 +298,8 @@ flux_image *flux_generate(flux_ctx *ctx, const char *prompt,
     }
 
     /* Validate dimensions */
-    if (p.width <= 0) p.width = 1024;
-    if (p.height <= 0) p.height = 1024;
+    if (p.width <= 0) p.width = FLUX_DEFAULT_WIDTH;
+    if (p.height <= 0) p.height = FLUX_DEFAULT_HEIGHT;
     if (p.num_steps <= 0) p.num_steps = 4;  /* Klein default */
     if (p.guidance_scale <= 0) p.guidance_scale = 1.0f;
 
@@ -308,6 +308,10 @@ flux_image *flux_generate(flux_ctx *ctx, const char *prompt,
     p.height = (p.height / 16) * 16;
     if (p.width < 64) p.width = 64;
     if (p.height < 64) p.height = 64;
+    if (p.width > FLUX_VAE_MAX_DIM || p.height > FLUX_VAE_MAX_DIM) {
+        set_error("Image dimensions exceed maximum (1792x1792)");
+        return NULL;
+    }
 
     /* Encode text */
     int text_seq;
@@ -396,8 +400,8 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
     }
 
     /* Validate dimensions */
-    if (p.width <= 0) p.width = 512;
-    if (p.height <= 0) p.height = 512;
+    if (p.width <= 0) p.width = FLUX_DEFAULT_WIDTH;
+    if (p.height <= 0) p.height = FLUX_DEFAULT_HEIGHT;
     if (p.num_steps <= 0) p.num_steps = 4;
     if (p.guidance_scale <= 0) p.guidance_scale = 1.0f;
 
@@ -405,6 +409,10 @@ flux_image *flux_generate_with_embeddings(flux_ctx *ctx,
     p.height = (p.height / 16) * 16;
     if (p.width < 64) p.width = 64;
     if (p.height < 64) p.height = 64;
+    if (p.width > FLUX_VAE_MAX_DIM || p.height > FLUX_VAE_MAX_DIM) {
+        set_error("Image dimensions exceed maximum (1792x1792)");
+        return NULL;
+    }
 
     /* Compute latent dimensions */
     int latent_h = p.height / 16;
@@ -476,8 +484,8 @@ flux_image *flux_generate_with_embeddings_and_noise(flux_ctx *ctx,
     }
 
     /* Validate dimensions */
-    if (p.width <= 0) p.width = 512;
-    if (p.height <= 0) p.height = 512;
+    if (p.width <= 0) p.width = FLUX_DEFAULT_WIDTH;
+    if (p.height <= 0) p.height = FLUX_DEFAULT_HEIGHT;
     if (p.num_steps <= 0) p.num_steps = 4;
     if (p.guidance_scale <= 0) p.guidance_scale = 1.0f;
 
@@ -485,6 +493,10 @@ flux_image *flux_generate_with_embeddings_and_noise(flux_ctx *ctx,
     p.height = (p.height / 16) * 16;
     if (p.width < 64) p.width = 64;
     if (p.height < 64) p.height = 64;
+    if (p.width > FLUX_VAE_MAX_DIM || p.height > FLUX_VAE_MAX_DIM) {
+        set_error("Image dimensions exceed maximum (1792x1792)");
+        return NULL;
+    }
 
     /* Compute latent dimensions */
     int latent_h = p.height / 16;
