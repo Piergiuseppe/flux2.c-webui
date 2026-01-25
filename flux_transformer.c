@@ -60,11 +60,6 @@ static int bf16_debug_enabled(void) {
     return enabled;
 }
 
-/* Keep bf16 batching off to avoid nondeterministic results. */
-static int bf16_batch_enabled(void) {
-    return 0;
-}
-
 #define BF16_DEBUG(...) \
     do { \
         if (bf16_debug_enabled()) { \
@@ -2396,11 +2391,10 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         goto cleanup;
     }
 
-    /* Double-stream blocks */
+    /* Double-stream blocks - batch ALL blocks together for minimal sync overhead.
+     * Weight buffers are cached in GPU memory, so safe to batch even with mmap. */
+    flux_gpu_batch_begin();
     for (int i = 0; i < tf->num_double_layers; i++) {
-        if (bf16_batch_enabled()) {
-            flux_gpu_batch_begin();
-        }
         if (tf->use_mmap) {
             load_double_block_weights(&tf->double_blocks[i], tf->sf, i,
                                       tf->hidden_size, tf->mlp_hidden, tf->use_bf16);
@@ -2415,9 +2409,7 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
                                        txt_rope_cos, txt_rope_sin,
                                        img_seq, txt_seq, tf)) {
             BF16_DEBUG("[BF16] double block %d failed\n", i);
-            if (bf16_batch_enabled()) {
-                flux_gpu_batch_end();
-            }
+            flux_gpu_batch_end();
             goto cleanup;
         }
         if (tf->use_mmap) {
@@ -2428,10 +2420,8 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         }
         if (flux_substep_callback)
             flux_substep_callback(FLUX_SUBSTEP_DOUBLE_BLOCK, i, tf->num_double_layers);
-        if (bf16_batch_enabled()) {
-            flux_gpu_batch_end();
-        }
     }
+    flux_gpu_batch_end();
     double_time = tf_get_time_ms() - double_start;
 
     /* Concatenate text and image for single blocks */
@@ -2440,13 +2430,9 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         BF16_DEBUG("[BF16] failed to allocate concat_hidden\n");
         goto cleanup;
     }
-    if (bf16_batch_enabled()) {
-        flux_gpu_batch_begin();
-    }
+    flux_gpu_batch_begin();
     flux_gpu_concat_seq_bf16(concat_hidden, txt_hidden, img_hidden, txt_seq, img_seq, hidden);
-    if (bf16_batch_enabled()) {
-        flux_gpu_batch_end();
-    }
+    flux_gpu_batch_end();
 
     /* Single-stream modulation */
     single_start = tf_get_time_ms();
@@ -2462,10 +2448,9 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         goto cleanup;
     }
 
+    /* Single-stream blocks - batch ALL blocks together for minimal sync overhead. */
+    flux_gpu_batch_begin();
     for (int i = 0; i < tf->num_single_layers; i++) {
-        if (bf16_batch_enabled()) {
-            flux_gpu_batch_begin();
-        }
         if (tf->use_mmap) {
             load_single_block_weights(&tf->single_blocks[i], tf->sf, i,
                                       tf->hidden_size, tf->mlp_hidden, tf->use_bf16);
@@ -2483,9 +2468,7 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
             if (norm_q) flux_gpu_tensor_free(norm_q);
             if (norm_k) flux_gpu_tensor_free(norm_k);
             BF16_DEBUG("[BF16] single block %d failed\n", i);
-            if (bf16_batch_enabled()) {
-                flux_gpu_batch_end();
-            }
+            flux_gpu_batch_end();
             goto cleanup;
         }
         flux_gpu_tensor_free(norm_q);
@@ -2497,10 +2480,8 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         }
         if (flux_substep_callback)
             flux_substep_callback(FLUX_SUBSTEP_SINGLE_BLOCK, i, tf->num_single_layers);
-        if (bf16_batch_enabled()) {
-            flux_gpu_batch_end();
-        }
     }
+    flux_gpu_batch_end();
     single_time = tf_get_time_ms() - single_start;
 
     /* Slice image portion for final layer */
@@ -2509,13 +2490,9 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         BF16_DEBUG("[BF16] failed to slice image hidden\n");
         goto cleanup;
     }
-    if (bf16_batch_enabled()) {
-        flux_gpu_batch_begin();
-    }
+    flux_gpu_batch_begin();
     flux_gpu_slice_seq_bf16(img_hidden_final, concat_hidden, img_seq, hidden, txt_seq);
-    if (bf16_batch_enabled()) {
-        flux_gpu_batch_end();
-    }
+    flux_gpu_batch_end();
 
     /* Final layer (bf16) */
     final_start = tf_get_time_ms();
@@ -2533,9 +2510,7 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         BF16_DEBUG("[BF16] failed to allocate final_norm\n");
         goto cleanup;
     }
-    if (bf16_batch_enabled()) {
-        flux_gpu_batch_begin();
-    }
+    flux_gpu_batch_begin();
     flux_gpu_adaln_norm_bf16(final_norm, img_hidden_final, final_shift, final_scale,
                              img_seq, hidden, 1e-6f);
 
@@ -2545,9 +2520,7 @@ static float *flux_transformer_forward_bf16(flux_transformer_t *tf,
         BF16_DEBUG("[BF16] final projection failed\n");
         goto cleanup;
     }
-    if (bf16_batch_enabled()) {
-        flux_gpu_batch_end();
-    }
+    flux_gpu_batch_end();
 
     output_f32 = flux_gpu_tensor_bf16_to_f32(output_bf16);
     if (!output_f32) {

@@ -4955,7 +4955,9 @@ flux_gpu_tensor_t flux_gpu_linear_bf16_native(flux_gpu_tensor_t x,
                                                int seq_len, int in_dim, int out_dim) {
     if (!g_shaders_initialized || !x || !x->is_f16 || !W_bf16) return NULL;
 
-    if (!tensor_batch_active() && bf16_linear_use_graph(seq_len, in_dim, out_dim)) {
+    /* MPSGraph linear is faster than our custom kernel. It supports batch mode
+     * by wrapping our command buffer with MPSCommandBuffer. */
+    if (bf16_linear_use_graph(seq_len, in_dim, out_dim)) {
         flux_gpu_tensor_t graph_out = flux_gpu_linear_bf16_mpsgraph(x, W_bf16,
                                                                     seq_len, in_dim, out_dim);
         if (graph_out) {
