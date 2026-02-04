@@ -55,6 +55,7 @@ typedef struct {
     int width;
     int height;
     int steps;
+    float guidance;
     int64_t seed;
     int image_count;
     int show_enabled;
@@ -246,6 +247,7 @@ static int generate_image(const char *prompt, const char *ref_image,
                           int explicit_width, int explicit_height) {
     flux_params params = FLUX_PARAMS_DEFAULT;
     params.num_steps = state.steps;
+    params.guidance = state.guidance;
 
     /* Determine seed */
     int64_t actual_seed;
@@ -291,30 +293,32 @@ static int generate_image(const char *prompt, const char *ref_image,
         }
         printf("Generating %dx%d...\n", params.width, params.height);
 
-        /* Try to use cached embedding */
-        float *embeddings = emb_cache_lookup(prompt);
-        if (embeddings) {
-            printf("(using cached embedding)\n");
-            img = flux_generate_with_embeddings(state.ctx, embeddings,
-                                                 QWEN3_MAX_SEQ_LEN, &params);
-            free(embeddings);
+        if (!flux_is_distilled(state.ctx)) {
+            /* Base model: use flux_generate() which handles CFG internally
+             * (needs both conditioned and unconditioned text encoding) */
+            img = flux_generate(state.ctx, prompt, &params);
         } else {
-            /* Encode and cache for next time */
-            int seq_len;
-            embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
+            /* Distilled model: use embedding cache for faster repeat prompts */
+            float *embeddings = emb_cache_lookup(prompt);
             if (embeddings) {
-                /* Cache the embedding (4-bit quantized) */
-                emb_cache_store(prompt, embeddings,
-                                seq_len * QWEN3_TEXT_DIM);
-
-                /* Release text encoder to free memory before generation */
-                flux_release_text_encoder(state.ctx);
-
+                printf("(using cached embedding)\n");
                 img = flux_generate_with_embeddings(state.ctx, embeddings,
-                                                     seq_len, &params);
+                                                     QWEN3_MAX_SEQ_LEN, &params);
                 free(embeddings);
             } else {
-                img = NULL;
+                /* Encode and cache for next time */
+                int seq_len;
+                embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
+                if (embeddings) {
+                    emb_cache_store(prompt, embeddings,
+                                    seq_len * QWEN3_TEXT_DIM);
+                    flux_release_text_encoder(state.ctx);
+                    img = flux_generate_with_embeddings(state.ctx, embeddings,
+                                                         seq_len, &params);
+                    free(embeddings);
+                } else {
+                    img = NULL;
+                }
             }
         }
     }
@@ -349,6 +353,7 @@ static int generate_multiref(const char *prompt, const char **ref_paths, int num
                              int explicit_width, int explicit_height) {
     flux_params params = FLUX_PARAMS_DEFAULT;
     params.num_steps = state.steps;
+    params.guidance = state.guidance;
 
     /* Determine seed */
     int64_t actual_seed;
@@ -436,6 +441,7 @@ static void cmd_help(void) {
     printf("  !seed <n>             Set seed (-1 for random)\n");
     printf("  !size <W>x<H>         Set default size\n");
     printf("  !steps <n>            Set sampling steps\n");
+    printf("  !guidance <n>         Set CFG guidance scale (0 = auto)\n");
     printf("  !explore <n> <prompt> Generate n thumbnail variations\n");
     printf("  !show                 Toggle terminal display\n");
     printf("  !zoom <n>             Set display zoom (default: 2 for Retina)\n");
@@ -581,6 +587,27 @@ static void cmd_steps(char *arg) {
     printf("Steps: %d\n", state.steps);
 }
 
+static void cmd_guidance(char *arg) {
+    arg = skip_spaces(arg);
+
+    if (!*arg) {
+        printf("Guidance: %.1f\n", state.guidance);
+        return;
+    }
+
+    float val = atof(arg);
+    if (val < 0 || val > 100) {
+        fprintf(stderr, "Error: Guidance must be 0-100 (0 = auto).\n");
+        return;
+    }
+    state.guidance = val;
+    if (state.guidance == 0) {
+        printf("Guidance: auto\n");
+    } else {
+        printf("Guidance: %.1f\n", state.guidance);
+    }
+}
+
 static void cmd_explore(char *arg) {
     arg = skip_spaces(arg);
 
@@ -625,49 +652,69 @@ static void cmd_explore(char *arg) {
     printf("Generating %d images at %dx%d...\n",
            count, state.width, state.height);
 
-    /* Try cached embedding first */
-    int seq_len = QWEN3_MAX_SEQ_LEN;
-    float *embeddings = emb_cache_lookup(prompt);
-
-    if (embeddings) {
-        printf("(using cached embedding)\n");
-    } else {
-        /* Encode and cache */
-        embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
-        if (!embeddings) {
-            fprintf(stderr, "Error: Failed to encode prompt.\n");
-            free(prompt_to_free);
-            return;
-        }
-        /* Cache for future use */
-        emb_cache_store(prompt, embeddings, seq_len * QWEN3_TEXT_DIM);
-        flux_release_text_encoder(state.ctx);
-    }
-
     flux_params params = FLUX_PARAMS_DEFAULT;
     params.width = state.width;
     params.height = state.height;
     params.num_steps = state.steps;
+    params.guidance = state.guidance;
 
-    for (int i = 0; i < count; i++) {
-        int64_t seed = (int64_t)time(NULL) ^ (int64_t)rand() ^ (int64_t)i;
-        params.seed = seed;
+    if (!flux_is_distilled(state.ctx)) {
+        /* Base model: use flux_generate() for CFG support */
+        for (int i = 0; i < count; i++) {
+            int64_t seed = (int64_t)time(NULL) ^ (int64_t)rand() ^ (int64_t)i;
+            params.seed = seed;
 
-        printf("  [%d/%d] Seed: %lld ", i + 1, count, (long long)seed);
-        fflush(stdout);
+            printf("  [%d/%d] Seed: %lld ", i + 1, count, (long long)seed);
+            fflush(stdout);
 
-        flux_image *img = flux_generate_with_embeddings(state.ctx, embeddings,
-                                                         seq_len, &params);
-        if (img) {
-            terminal_display_image(img, cli_term_proto);
-            flux_image_free(img);
-            printf("\n");
-        } else {
-            printf("(failed)\n");
+            flux_image *img = flux_generate(state.ctx, prompt, &params);
+            if (img) {
+                terminal_display_image(img, cli_term_proto);
+                flux_image_free(img);
+                printf("\n");
+            } else {
+                printf("(failed)\n");
+            }
         }
+    } else {
+        /* Distilled model: use embedding cache for faster repeat prompts */
+        int seq_len = QWEN3_MAX_SEQ_LEN;
+        float *embeddings = emb_cache_lookup(prompt);
+
+        if (embeddings) {
+            printf("(using cached embedding)\n");
+        } else {
+            embeddings = flux_encode_text(state.ctx, prompt, &seq_len);
+            if (!embeddings) {
+                fprintf(stderr, "Error: Failed to encode prompt.\n");
+                free(prompt_to_free);
+                return;
+            }
+            emb_cache_store(prompt, embeddings, seq_len * QWEN3_TEXT_DIM);
+            flux_release_text_encoder(state.ctx);
+        }
+
+        for (int i = 0; i < count; i++) {
+            int64_t seed = (int64_t)time(NULL) ^ (int64_t)rand() ^ (int64_t)i;
+            params.seed = seed;
+
+            printf("  [%d/%d] Seed: %lld ", i + 1, count, (long long)seed);
+            fflush(stdout);
+
+            flux_image *img = flux_generate_with_embeddings(state.ctx, embeddings,
+                                                             seq_len, &params);
+            if (img) {
+                terminal_display_image(img, cli_term_proto);
+                flux_image_free(img);
+                printf("\n");
+            } else {
+                printf("(failed)\n");
+            }
+        }
+
+        free(embeddings);
     }
 
-    free(embeddings);
     free(prompt_to_free);
     printf("Done. Use !seed <n> then re-run prompt at full size.\n");
 }
@@ -718,6 +765,8 @@ static int process_command(char *line) {
         cmd_size(cmd + 4);
     } else if (starts_with_ci(cmd, "steps")) {
         cmd_steps(cmd + 5);
+    } else if (starts_with_ci(cmd, "guidance")) {
+        cmd_guidance(cmd + 8);
     } else if (starts_with_ci(cmd, "explore")) {
         cmd_explore(cmd + 7);
     } else if (starts_with_ci(cmd, "show")) {
@@ -830,6 +879,7 @@ static void print_banner(void) {
         printf("Display: Images saved to %s/\n", state.tmpdir);
     }
 
+    printf("Type: %s\n", flux_is_distilled(state.ctx) ? "distilled" : "base (CFG)");
     printf("\nType a prompt to generate an image. Use !help for commands.\n");
     printf("Default size: %dx%d | Steps: %d | Seed: %s\n\n",
            state.width, state.height, state.steps,
@@ -843,7 +893,9 @@ int flux_cli_run(flux_ctx *ctx, const char *model_dir) {
     strncpy(state.model_dir, model_dir, sizeof(state.model_dir) - 1);
     state.width = CLI_DEFAULT_WIDTH;
     state.height = CLI_DEFAULT_HEIGHT;
-    state.steps = CLI_DEFAULT_STEPS;
+    /* Use model defaults for steps and guidance */
+    state.steps = flux_is_distilled(ctx) ? 4 : 50;
+    state.guidance = 0.0f;  /* 0 = auto from model type */
     state.seed = -1;
 
     /* Initialize embedding cache */

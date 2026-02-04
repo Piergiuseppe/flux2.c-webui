@@ -84,14 +84,15 @@ struct flux_image {
 typedef struct {
     int width;              /* Output width (default: 256) */
     int height;             /* Output height (default: 256) */
-    int num_steps;          /* Inference steps (default: 4 for klein) */
+    int num_steps;          /* Inference steps (default: 4 distilled, 50 base) */
     int64_t seed;           /* Random seed (-1 for random) */
+    float guidance;         /* CFG guidance scale (0 = auto from model type) */
 } flux_params;
 
 /* Default parameters */
 #define FLUX_DEFAULT_WIDTH  256
 #define FLUX_DEFAULT_HEIGHT 256
-#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 4, -1 }
+#define FLUX_PARAMS_DEFAULT { FLUX_DEFAULT_WIDTH, FLUX_DEFAULT_HEIGHT, 0, -1, 0.0f }
 
 /* ========================================================================
  * Core API
@@ -123,6 +124,18 @@ void flux_release_text_encoder(flux_ctx *ctx);
  * Call this after flux_load_dir() and before first generation.
  */
 void flux_set_mmap(flux_ctx *ctx, int enable);
+
+/*
+ * Check if model is distilled (4-step) or base (50-step with CFG).
+ * Returns 1 for distilled, 0 for base.
+ */
+int flux_is_distilled(flux_ctx *ctx);
+
+/*
+ * Force base model mode (overrides autodetection).
+ * Call after flux_load_dir() if model_index.json is missing.
+ */
+void flux_set_base_mode(flux_ctx *ctx);
 
 /*
  * Text-to-image generation.

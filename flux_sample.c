@@ -421,6 +421,247 @@ float *flux_sample_euler_with_multi_refs(void *transformer, void *text_encoder,
     return z_curr;
 }
 
+/* ========================================================================
+ * CFG (Classifier-Free Guidance) Samplers for Base Model
+ *
+ * These run the transformer twice per step: once with empty text (uncond)
+ * and once with the real prompt (cond), then combine:
+ *   v = v_uncond + guidance_scale * (v_cond - v_uncond)
+ * ======================================================================== */
+
+/*
+ * Euler sampler with CFG for text-to-image.
+ */
+float *flux_sample_euler_cfg(void *transformer, void *text_encoder,
+                              float *z, int batch, int channels, int h, int w,
+                              const float *text_emb_cond, int text_seq_cond,
+                              const float *text_emb_uncond, int text_seq_uncond,
+                              float guidance_scale,
+                              const float *schedule, int num_steps,
+                              void (*progress_callback)(int step, int total)) {
+    (void)text_encoder;
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    flux_copy(z_curr, z, latent_size);
+
+    flux_reset_timing();
+    double total_denoising_start = get_time_ms();
+    double step_times[FLUX_MAX_STEPS];
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;
+
+        double step_start = get_time_ms();
+
+        if (flux_step_callback)
+            flux_step_callback(step + 1, num_steps);
+
+        /* Unconditioned prediction */
+        float *v_uncond = flux_transformer_forward(tf, z_curr, h, w,
+                                                    text_emb_uncond, text_seq_uncond,
+                                                    t_curr);
+
+        /* Conditioned prediction */
+        float *v_cond = flux_transformer_forward(tf, z_curr, h, w,
+                                                  text_emb_cond, text_seq_cond,
+                                                  t_curr);
+
+        /* CFG combine: v = v_uncond + scale * (v_cond - v_uncond) */
+        for (int i = 0; i < latent_size; i++) {
+            float v = v_uncond[i] + guidance_scale * (v_cond[i] - v_uncond[i]);
+            z_curr[i] += dt * v;
+        }
+
+        free(v_uncond);
+        free(v_cond);
+
+        step_times[step] = get_time_ms() - step_start;
+
+        if (progress_callback)
+            progress_callback(step + 1, num_steps);
+
+        if (flux_step_image_callback && flux_step_image_vae) {
+            flux_image *img = flux_vae_decode((flux_vae_t *)flux_step_image_vae,
+                                              z_curr, 1, h, w);
+            if (img) {
+                flux_step_image_callback(step + 1, num_steps, img);
+                flux_image_free(img);
+            }
+        }
+    }
+
+    double total_denoising = get_time_ms() - total_denoising_start;
+    fprintf(stderr, "\nDenoising timing breakdown (CFG, guidance=%.1f):\n", guidance_scale);
+    for (int step = 0; step < num_steps; step++) {
+        fprintf(stderr, "  Step %d: %.1f ms\n", step + 1, step_times[step]);
+    }
+    fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
+
+    return z_curr;
+}
+
+/*
+ * Euler sampler with CFG and single reference image (img2img).
+ */
+float *flux_sample_euler_cfg_with_refs(void *transformer, void *text_encoder,
+                                        float *z, int batch, int channels, int h, int w,
+                                        const float *ref_latent, int ref_h, int ref_w,
+                                        int t_offset,
+                                        const float *text_emb_cond, int text_seq_cond,
+                                        const float *text_emb_uncond, int text_seq_uncond,
+                                        float guidance_scale,
+                                        const float *schedule, int num_steps,
+                                        void (*progress_callback)(int step, int total)) {
+    (void)text_encoder;
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    flux_copy(z_curr, z, latent_size);
+
+    flux_reset_timing();
+    double total_denoising_start = get_time_ms();
+    double step_times[FLUX_MAX_STEPS];
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;
+
+        double step_start = get_time_ms();
+
+        if (flux_step_callback)
+            flux_step_callback(step + 1, num_steps);
+
+        /* Unconditioned prediction (with ref) */
+        float *v_uncond = flux_transformer_forward_with_refs(tf,
+                              z_curr, h, w,
+                              ref_latent, ref_h, ref_w, t_offset,
+                              text_emb_uncond, text_seq_uncond, t_curr);
+
+        /* Conditioned prediction (with ref) */
+        float *v_cond = flux_transformer_forward_with_refs(tf,
+                            z_curr, h, w,
+                            ref_latent, ref_h, ref_w, t_offset,
+                            text_emb_cond, text_seq_cond, t_curr);
+
+        /* CFG combine */
+        for (int i = 0; i < latent_size; i++) {
+            float v = v_uncond[i] + guidance_scale * (v_cond[i] - v_uncond[i]);
+            z_curr[i] += dt * v;
+        }
+
+        free(v_uncond);
+        free(v_cond);
+
+        step_times[step] = get_time_ms() - step_start;
+
+        if (progress_callback)
+            progress_callback(step + 1, num_steps);
+
+        if (flux_step_image_callback && flux_step_image_vae) {
+            flux_image *img = flux_vae_decode((flux_vae_t *)flux_step_image_vae,
+                                              z_curr, 1, h, w);
+            if (img) {
+                flux_step_image_callback(step + 1, num_steps, img);
+                flux_image_free(img);
+            }
+        }
+    }
+
+    double total_denoising = get_time_ms() - total_denoising_start;
+    fprintf(stderr, "\nDenoising timing breakdown (CFG img2img, guidance=%.1f):\n", guidance_scale);
+    for (int step = 0; step < num_steps; step++) {
+        fprintf(stderr, "  Step %d: %.1f ms\n", step + 1, step_times[step]);
+    }
+    fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
+
+    return z_curr;
+}
+
+/*
+ * Euler sampler with CFG and multiple reference images.
+ */
+float *flux_sample_euler_cfg_with_multi_refs(void *transformer, void *text_encoder,
+                                              float *z, int batch, int channels, int h, int w,
+                                              const flux_ref_t *refs, int num_refs,
+                                              const float *text_emb_cond, int text_seq_cond,
+                                              const float *text_emb_uncond, int text_seq_uncond,
+                                              float guidance_scale,
+                                              const float *schedule, int num_steps,
+                                              void (*progress_callback)(int step, int total)) {
+    (void)text_encoder;
+    flux_transformer_t *tf = (flux_transformer_t *)transformer;
+    int latent_size = batch * channels * h * w;
+
+    float *z_curr = (float *)malloc(latent_size * sizeof(float));
+    flux_copy(z_curr, z, latent_size);
+
+    flux_reset_timing();
+    double total_denoising_start = get_time_ms();
+    double step_times[FLUX_MAX_STEPS];
+
+    for (int step = 0; step < num_steps; step++) {
+        float t_curr = schedule[step];
+        float t_next = schedule[step + 1];
+        float dt = t_next - t_curr;
+
+        double step_start = get_time_ms();
+
+        if (flux_step_callback)
+            flux_step_callback(step + 1, num_steps);
+
+        /* Unconditioned prediction (with refs) */
+        float *v_uncond = flux_transformer_forward_with_multi_refs(tf,
+                              z_curr, h, w,
+                              refs, num_refs,
+                              text_emb_uncond, text_seq_uncond, t_curr);
+
+        /* Conditioned prediction (with refs) */
+        float *v_cond = flux_transformer_forward_with_multi_refs(tf,
+                            z_curr, h, w,
+                            refs, num_refs,
+                            text_emb_cond, text_seq_cond, t_curr);
+
+        /* CFG combine */
+        for (int i = 0; i < latent_size; i++) {
+            float v = v_uncond[i] + guidance_scale * (v_cond[i] - v_uncond[i]);
+            z_curr[i] += dt * v;
+        }
+
+        free(v_uncond);
+        free(v_cond);
+
+        step_times[step] = get_time_ms() - step_start;
+
+        if (progress_callback)
+            progress_callback(step + 1, num_steps);
+
+        if (flux_step_image_callback && flux_step_image_vae) {
+            flux_image *img = flux_vae_decode((flux_vae_t *)flux_step_image_vae,
+                                              z_curr, 1, h, w);
+            if (img) {
+                flux_step_image_callback(step + 1, num_steps, img);
+                flux_image_free(img);
+            }
+        }
+    }
+
+    double total_denoising = get_time_ms() - total_denoising_start;
+    fprintf(stderr, "\nDenoising timing breakdown (CFG multi-ref, %d refs, guidance=%.1f):\n",
+            num_refs, guidance_scale);
+    for (int step = 0; step < num_steps; step++) {
+        fprintf(stderr, "  Step %d: %.1f ms\n", step + 1, step_times[step]);
+    }
+    fprintf(stderr, "  Total denoising: %.1f ms (%.2f s)\n", total_denoising, total_denoising / 1000.0);
+
+    return z_curr;
+}
+
 /*
  * Sample using Euler method with stochastic noise injection.
  * This can help with diversity and quality.

@@ -211,8 +211,11 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "Generation options:\n");
     fprintf(stderr, "  -W, --width N         Output width (default: %d)\n", DEFAULT_WIDTH);
     fprintf(stderr, "  -H, --height N        Output height (default: %d)\n", DEFAULT_HEIGHT);
-    fprintf(stderr, "  -s, --steps N         Sampling steps (default: %d)\n", DEFAULT_STEPS);
+    fprintf(stderr, "  -s, --steps N         Sampling steps (default: auto, 4 distilled / 50 base)\n");
+    fprintf(stderr, "  -g, --guidance N      CFG guidance scale (default: auto, 1.0 distilled / 4.0 base)\n");
     fprintf(stderr, "  -S, --seed N          Random seed (-1 for random)\n\n");
+    fprintf(stderr, "Model options:\n");
+    fprintf(stderr, "      --base            Force base model mode (undistilled, CFG enabled)\n\n");
     fprintf(stderr, "Reference images (img2img / multi-reference):\n");
     fprintf(stderr, "  -i, --input PATH      Reference image (can specify up to %d)\n", MAX_INPUT_IMAGES);
     fprintf(stderr, "                        Multiple -i flags combine images via in-context conditioning\n\n");
@@ -254,6 +257,7 @@ int main(int argc, char *argv[]) {
         {"width",      required_argument, 0, 'W'},
         {"height",     required_argument, 0, 'H'},
         {"steps",      required_argument, 0, 's'},
+        {"guidance",   required_argument, 0, 'g'},
         {"seed",       required_argument, 0, 'S'},
         {"input",      required_argument, 0, 'i'},
         {"embeddings", required_argument, 0, 'e'},
@@ -267,6 +271,7 @@ int main(int argc, char *argv[]) {
         {"show",       no_argument,       0, 'k'},
         {"show-steps", no_argument,       0, 'K'},
         {"zoom",       required_argument, 0, 'z'},
+        {"base",       no_argument,       0, 'B'},
         {"debug-py",   no_argument,       0, 'D'},
         {0, 0, 0, 0}
     };
@@ -283,15 +288,17 @@ int main(int argc, char *argv[]) {
     flux_params params = {
         .width = DEFAULT_WIDTH,
         .height = DEFAULT_HEIGHT,
-        .num_steps = DEFAULT_STEPS,
-        .seed = -1
+        .num_steps = 0,   /* 0 = auto from model type */
+        .seed = -1,
+        .guidance = 0.0f  /* 0 = auto from model type */
     };
 
-    int width_set = 0, height_set = 0;
+    int width_set = 0, height_set = 0, steps_set = 0;
     int use_mmap = 1;  /* mmap is default (fastest on MPS) */
     int show_image = 0;
     int show_steps = 0;
     int debug_py = 0;
+    int force_base = 0;
     term_graphics_proto graphics_proto = detect_terminal_graphics();
 
     int opt;
@@ -303,7 +310,8 @@ int main(int argc, char *argv[]) {
             case 'o': output_path = optarg; break;
             case 'W': params.width = atoi(optarg); width_set = 1; break;
             case 'H': params.height = atoi(optarg); height_set = 1; break;
-            case 's': params.num_steps = atoi(optarg); break;
+            case 's': params.num_steps = atoi(optarg); steps_set = 1; break;
+            case 'g': params.guidance = atof(optarg); break;
             case 'S': params.seed = atoll(optarg); break;
             case 'i':
                 if (num_inputs < MAX_INPUT_IMAGES) {
@@ -325,6 +333,7 @@ int main(int argc, char *argv[]) {
             case 'k': show_image = 1; break;
             case 'K': show_steps = 1; break;
             case 'z': terminal_set_zoom(atoi(optarg)); break;
+            case 'B': force_base = 1; break;
             case 'D': debug_py = 1; break;
             default:
                 print_usage(argv[0]);
@@ -364,7 +373,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error: Height must be between 64 and 4096\n");
         return 1;
     }
-    if (params.num_steps < 1 || params.num_steps > FLUX_MAX_STEPS) {
+    if (steps_set && (params.num_steps < 1 || params.num_steps > FLUX_MAX_STEPS)) {
         fprintf(stderr, "Error: Steps must be between 1 and %d\n", FLUX_MAX_STEPS);
         return 1;
     }
@@ -412,9 +421,14 @@ int main(int argc, char *argv[]) {
         LOG_VERBOSE("  Using mmap mode for text encoder (lower memory)\n");
     }
 
+    /* Override model type if --base was specified */
+    if (force_base) {
+        flux_set_base_mode(ctx);
+    }
+
     double load_time = timer_end();
     LOG_NORMAL(" done (%.1fs)\n", load_time);
-    LOG_VERBOSE("  Model info: %s\n", flux_model_info(ctx));
+    LOG_NORMAL("Model: %s\n", flux_model_info(ctx));
 
     /* Interactive mode: start REPL */
     if (interactive_mode) {
