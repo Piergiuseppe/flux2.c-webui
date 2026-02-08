@@ -29,10 +29,13 @@ Usage: python download_model.py MODEL [--token TOKEN] [--output-dir DIR]
 
 Available models:
 
-  4b        Distilled 4B (4 steps, fast, ~16 GB)
-  4b-base   Base 4B (50 steps, CFG, higher quality, ~16 GB)
-  9b        Distilled 9B (4 steps, higher quality, non-commercial, ~30 GB)
-  9b-base   Base 9B (50 steps, CFG, highest quality, non-commercial, ~30 GB)
+  4b        Distilled 4B (4 steps, fast, ~16 GB disk)
+  4b-base   Base 4B (50 steps, CFG, higher quality, ~16 GB disk)
+  9b        Distilled 9B (4 steps, higher quality, non-commercial, ~30 GB disk)
+  9b-base   Base 9B (50 steps, CFG, highest quality, non-commercial, ~30 GB disk)
+
+By default this implementation uses mmap() so inference is often
+possible with less RAM than the model size.
 
 If this is your first time, we suggest downloading the "4b" model:
   python download_model.py 4b"""

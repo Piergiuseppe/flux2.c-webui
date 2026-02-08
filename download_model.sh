@@ -8,10 +8,13 @@ show_usage() {
     echo ""
     echo "Available models:"
     echo ""
-    echo "  4b        Distilled 4B (4 steps, fast, ~16 GB)"
-    echo "  4b-base   Base 4B (50 steps, CFG, higher quality, ~16 GB)"
-    echo "  9b        Distilled 9B (4 steps, higher quality, non-commercial, ~30 GB)"
-    echo "  9b-base   Base 9B (50 steps, CFG, highest quality, non-commercial, ~30 GB)"
+    echo "  4b        Distilled 4B (4 steps, fast, ~16 GB disk)"
+    echo "  4b-base   Base 4B (50 steps, CFG, higher quality, ~16 GB disk)"
+    echo "  9b        Distilled 9B (4 steps, higher quality, non-commercial, ~30 GB disk)"
+    echo "  9b-base   Base 9B (50 steps, CFG, highest quality, non-commercial, ~30 GB disk)"
+    echo ""
+    echo "By default this implementation uses mmap() so inference is often"
+    echo "possible with less RAM than the model size."
     echo ""
     echo "If this is your first time, we suggest downloading the \"4b\" model:"
     echo "  $0 4b"
@@ -87,19 +90,30 @@ BASE="https://huggingface.co/black-forest-labs/$REPO/resolve/main"
 
 # Helper function to download with optional auth
 dl() {
+    local rc=0
     if [ -n "$TOKEN" ]; then
-        curl -fL -H "Authorization: Bearer $TOKEN" -o "$1" "$2"
+        curl -fL -H "Authorization: Bearer $TOKEN" -o "$1" "$2" || rc=$?
     else
-        curl -fL -o "$1" "$2"
+        curl -fL -o "$1" "$2" || rc=$?
     fi
-    # Check for auth errors
-    if [ $? -ne 0 ]; then
-        echo "Error downloading $2"
-        echo "If this is a gated model, you need a HuggingFace token:"
-        echo "  1. Accept the license at https://huggingface.co/black-forest-labs/$REPO"
-        echo "  2. Get your token from https://huggingface.co/settings/tokens"
-        echo "  3. Run: $0 $MODEL --token YOUR_TOKEN"
-        echo "  Or set HF_TOKEN env var, or save token to hf_token.txt"
+    if [ $rc -ne 0 ]; then
+        echo ""
+        echo "Error: failed to download $(basename "$1")"
+        echo "URL: $2"
+        echo ""
+        if [ -z "$TOKEN" ]; then
+            echo "This may be a gated model that requires authentication."
+            echo "  1. Accept the license at https://huggingface.co/black-forest-labs/$REPO"
+            echo "  2. Get your token from https://huggingface.co/settings/tokens"
+            echo "  3. Run: $0 $MODEL --token YOUR_TOKEN"
+            echo "  Or set HF_TOKEN env var, or save token to hf_token.txt"
+        else
+            echo "Authentication failed (HTTP 403). Possible causes:"
+            echo "  - Token may be invalid or expired"
+            echo "  - You may need to accept the license first:"
+            echo "    https://huggingface.co/black-forest-labs/$REPO"
+            echo "  - The repository name may not exist (check spelling)"
+        fi
         exit 1
     fi
 }
@@ -149,7 +163,7 @@ dl "$OUT/transformer/config.json" "$BASE/transformer/config.json"
 # Fall back to single file for non-sharded models (4B)
 TF_INDEX="$OUT/transformer/diffusion_pytorch_model.safetensors.index.json"
 curl -fL ${TOKEN:+-H "Authorization: Bearer $TOKEN"} -o "$TF_INDEX" \
-    "$BASE/transformer/diffusion_pytorch_model.safetensors.index.json" 2>/dev/null
+    "$BASE/transformer/diffusion_pytorch_model.safetensors.index.json" 2>/dev/null || rm -f "$TF_INDEX"
 
 if [ -f "$TF_INDEX" ]; then
     # Sharded: discover and download all shards
