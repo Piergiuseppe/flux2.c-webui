@@ -45,6 +45,7 @@ extern int openblas_get_num_threads(void);
 extern int openblas_get_num_procs(void);
 extern char *openblas_get_corename(void);
 extern char *openblas_get_config(void);
+extern void openblas_set_num_threads(int num_threads);
 #endif
 #endif
 
@@ -245,6 +246,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -e, --embeddings PATH Load pre-computed text embeddings\n");
     fprintf(stderr, "  -m, --mmap            Use memory-mapped weights (default, fastest on MPS)\n");
     fprintf(stderr, "      --no-mmap         Disable mmap, load all weights upfront\n");
+    fprintf(stderr, "      --blas-threads N  Set number of BLAS threads (OpenBLAS only)\n");
     fprintf(stderr, "  -h, --help            Show this help\n\n");
     fprintf(stderr, "Examples:\n");
     fprintf(stderr, "  %s -d model/ -p \"a cat on a rainbow\" -o cat.png\n", prog);
@@ -260,21 +262,7 @@ int main(int argc, char *argv[]) {
 #ifdef USE_METAL
     flux_metal_init();
 #elif defined(USE_BLAS)
-    {
-#ifdef __APPLE__
-        char cpu_brand[128] = "Apple Silicon";
-        size_t len = sizeof(cpu_brand);
-        sysctlbyname("machdep.cpu.brand_string", cpu_brand, &len, NULL, 0);
-        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-        fprintf(stderr, "BLAS: Accelerate | %s | %ld cores\n", cpu_brand, ncpu);
-#else
-        fprintf(stderr, "BLAS: OpenBLAS | %s | %d threads / %d procs\n",
-                openblas_get_corename(),
-                openblas_get_num_threads(),
-                openblas_get_num_procs());
-        fprintf(stderr, "      %s\n", openblas_get_config());
-#endif
-    }
+    /* BLAS banner printed after option parsing (--blas-threads may change it) */
 #else
     fprintf(stderr, "Generic: Pure C backend (no acceleration)\n");
 #endif
@@ -306,6 +294,7 @@ int main(int argc, char *argv[]) {
         {"power",      no_argument,       0, 256},
         {"power-alpha",required_argument, 0, 257},
         {"debug-py",   no_argument,       0, 'D'},
+        {"blas-threads",required_argument, 0, 258},
         {0, 0, 0, 0}
     };
 
@@ -333,6 +322,7 @@ int main(int argc, char *argv[]) {
     int show_steps = 0;
     int debug_py = 0;
     int force_base = 0;
+    int blas_threads = 0; (void)blas_threads;
     term_graphics_proto graphics_proto = detect_terminal_graphics();
 
     int opt;
@@ -372,11 +362,36 @@ int main(int argc, char *argv[]) {
             case 256: params.power_schedule = 1; break;
             case 257: params.power_alpha = atof(optarg); params.power_schedule = 1; break;
             case 'D': debug_py = 1; break;
+            case 258: blas_threads = atoi(optarg); break;
             default:
                 print_usage(argv[0]);
                 return 1;
         }
     }
+
+    /* BLAS: set threads and print banner */
+#ifdef USE_BLAS
+#ifndef USE_METAL
+    {
+#ifdef __APPLE__
+        char cpu_brand[128] = "Apple Silicon";
+        size_t len = sizeof(cpu_brand);
+        sysctlbyname("machdep.cpu.brand_string", cpu_brand, &len, NULL, 0);
+        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        fprintf(stderr, "BLAS: Accelerate | %s | %ld cores\n", cpu_brand, ncpu);
+        if (blas_threads > 0)
+            fprintf(stderr, "Warning: --blas-threads ignored (Accelerate manages threading automatically)\n");
+#else
+        if (blas_threads > 0) openblas_set_num_threads(blas_threads);
+        fprintf(stderr, "BLAS: OpenBLAS | %s | %d threads / %d procs\n",
+                openblas_get_corename(),
+                openblas_get_num_threads(),
+                openblas_get_num_procs());
+        fprintf(stderr, "      %s\n", openblas_get_config());
+#endif
+    }
+#endif
+#endif
 
     /* Validate required arguments */
     if (!model_dir) {
