@@ -3055,15 +3055,18 @@ int flux_metal_init_shaders(void) {
 
         /* Compile shader library */
         MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
-  #if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
-          if (@available(macOS 15.0, *)) {
-              options.mathMode = MTLMathModeFast;
-          } else {
-              options.fastMathEnabled = YES;
-          }
-  #else
-          options.fastMathEnabled = YES;
-  #endif
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+        if (@available(macOS 15.0, *)) {
+            options.mathMode = MTLMathModeFast;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            options.fastMathEnabled = YES;
+#pragma clang diagnostic pop
+        }
+#else
+        options.fastMathEnabled = YES;
+#endif
 
         g_shader_library = [g_device newLibraryWithSource:shaderSource
                                                   options:options
