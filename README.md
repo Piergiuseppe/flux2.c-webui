@@ -265,6 +265,20 @@ The following metadata fields are stored:
 - `iris:model` - The model used
 - `Software` - Program identifier
 
+## Web UI
+
+A browser-based interface is available in the [`webui/`](webui/) directory. It exposes all generation settings, supports image-to-image with multiple references, and tracks tasks with real-time progress — even across page reloads.
+
+```bash
+cd webui
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+See [`webui/README.md`](webui/README.md) for details.
+
 ## Building
 
 Choose a backend when building:
