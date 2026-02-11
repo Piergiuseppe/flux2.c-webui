@@ -2,7 +2,7 @@
 
 A Streamlit interface for the flux image generation binary. Exposes all generation settings in a browser-based UI with persistent task tracking.
 
-![Web UI](https://github.com/user-attachments/assets/placeholder)
+![Web UI](./assets/screenshot.png)
 
 ## Setup
 

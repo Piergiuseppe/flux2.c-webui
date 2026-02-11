@@ -63,8 +63,10 @@ with st.sidebar:
         "Model",
         models,
         format_func=lambda m: m["label"],
-        help="The FLUX.2 model to use. Distilled is fast (4 steps), "
-             "base produces higher quality but is ~25x slower.",
+        help="Only locally downloaded models are shown. "
+             "To download more, run from the project root:\n\n"
+             "**Distilled** (fast, 4 steps): `./download_model.sh`\n\n"
+             "**Base** (high quality, 50 steps): `./download_model.sh --base`",
     )
     is_distilled = model["distilled"]
 
